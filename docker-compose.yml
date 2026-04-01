@@ -1,1 +1,50 @@
-version: '3.8'\n\nservices:\n  web:\n    build: .\n    ports:\n      - '5000:5000'\n    environment:\n      - FLASK_ENV=development\n      - DATABASE_URL=postgresql://postgres:postgres@db/postgres\n    depends_on:\n      - db\n      - redis\n\n  db:\n    image: postgres:latest\n    environment:\n      POSTGRES_USER: postgres\n      POSTGRES_PASSWORD: postgres\n      POSTGRES_DB: postgres\n    volumes:\n      - postgres_data:/var/lib/postgresql/data\n\n  redis:\n    image: redis:latest\n\nvolumes:\n  postgres_data:
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - '8080:8080'
+    environment:
+      - FLASK_ENV=development
+      - MONGO_URI=mongodb://mongo:27017/open-claw
+      - REDIS_URL=redis://redis:6379/0
+      - FORTRESS_ENABLED=true
+      - FORTRESS_DATA_DIR=/app/fortress_data
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  mongo:
+    image: mongo:6
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mongo_data:

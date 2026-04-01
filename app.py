@@ -1,1 +1,338 @@
-from flask import Flask, jsonify, request\nfrom datetime import datetime\nimport uuid\nimport logging\n\napp = Flask(__name__)\n\n# Configure logging\nlogging.basicConfig(level=logging.INFO)\nlogger = logging.getLogger(__name__)\n\n# In-memory storage (replace with database in production)\nagents = {}\ntasks = {}\nagents_counter = 0\ntasks_counter = 0\n\n# ============================================\n# Agent Management Endpoints\n# ============================================\n\n@app.route('/api/agents', methods=['POST'])\ndef create_agent():\n    """Create a new agent"""\n    try:\n        data = request.json\n        agent_id = str(uuid.uuid4())\n        \n        agent = {\n            'id': agent_id,\n            'name': data.get('name', 'Agent'),\n            'type': data.get('type', 'generic'),\n            'status': 'idle',\n            'created_at': datetime.utcnow().isoformat(),\n            'capabilities': data.get('capabilities', []),\n            'tasks_completed': 0\n        }\n        \nagents[agent_id] = agent\n        logger.info(f"Created agent: {agent_id}")\n        return jsonify(agent), 201\n    except Exception as e:\n        logger.error(f"Error creating agent: {str(e)}")\n        return jsonify({'error': str(e)}), 400\n\n@app.route('/api/agents', methods=['GET'])\ndef list_agents():\n    """List all agents"""\n    return jsonify(list(agents.values())), 200\n\n@app.route('/api/agents/<agent_id>', methods=['GET'])\ndef get_agent(agent_id):\n    """Get details of a specific agent"""\n    agent = agents.get(agent_id)\n    if not agent:\n        return jsonify({'error': 'Agent not found'}), 404\n    return jsonify(agent), 200\n\n@app.route('/api/agents/<agent_id>', methods=['PUT'])\ndef update_agent(agent_id):\n    """Update agent status or properties"""\n    try:\n        if agent_id not in agents:\n            return jsonify({'error': 'Agent not found'}), 404\n        \n        data = request.json\n        agent = agents[agent_id]\n        \n        if 'status' in data:\n            agent['status'] = data['status']\n        if 'capabilities' in data:\n            agent['capabilities'] = data['capabilities']\n        \n        logger.info(f"Updated agent: {agent_id}")\n        return jsonify(agent), 200\n    except Exception as e:\n        logger.error(f"Error updating agent: {str(e)}")\n        return jsonify({'error': str(e)}), 400\n\n@app.route('/api/agents/<agent_id>', methods=['DELETE'])\ndef delete_agent(agent_id):\n    """Delete an agent"""\n    if agent_id not in agents:\n        return jsonify({'error': 'Agent not found'}), 404\n    \n    del agents[agent_id]\n    logger.info(f"Deleted agent: {agent_id}")\n    return jsonify({'message': 'Agent deleted'}), 200\n\n# ============================================\n# Task Management Endpoints\n# ============================================\n\n@app.route('/api/tasks', methods=['POST'])\ndef submit_task():\n    """Submit a new task"""\n    try:\n        data = request.json\n        task_id = str(uuid.uuid4())\n        \n        task = {\n            'id': task_id,\n            'name': data.get('name', 'Unnamed Task'),\n            'description': data.get('description', ''),\n            'agent_id': data.get('agent_id'),\n            'status': 'pending',\n            'priority': data.get('priority', 'normal'),\n            'created_at': datetime.utcnow().isoformat(),\n            'started_at': None,\n            'completed_at': None,\n            'result': None\n        }\n        \ntasks[task_id] = task\n        logger.info(f"Created task: {task_id}")\n        return jsonify(task), 201\n    except Exception as e:\n        logger.error(f"Error creating task: {str(e)}")\n        return jsonify({'error': str(e)}), 400\n\n@app.route('/api/tasks', methods=['GET'])\ndef list_tasks():\n    """List all tasks with optional filtering"""\n    status_filter = request.args.get('status')\n    agent_filter = request.args.get('agent_id')\n    \n    filtered_tasks = list(tasks.values())\n    \n    if status_filter:\n        filtered_tasks = [t for t in filtered_tasks if t['status'] == status_filter]\n    if agent_filter:\n        filtered_tasks = [t for t in filtered_tasks if t['agent_id'] == agent_filter]\n    \n    return jsonify(filtered_tasks), 200\n\n@app.route('/api/tasks/<task_id>', methods=['GET'])\ndef get_task(task_id):\n    """Get details of a specific task"""\n    task = tasks.get(task_id)\n    if not task:\n        return jsonify({'error': 'Task not found'}), 404\n    return jsonify(task), 200\n\n@app.route('/api/tasks/<task_id>', methods=['PUT'])\ndef update_task(task_id):\n    """Update task status or result"""\n    try:\n        if task_id not in tasks:\n            return jsonify({'error': 'Task not found'}), 404\n        \n        data = request.json\n        task = tasks[task_id]\n        \n        if 'status' in data:\n            task['status'] = data['status']\n            if data['status'] == 'running':\n                task['started_at'] = datetime.utcnow().isoformat()\n            elif data['status'] == 'completed':\n                task['completed_at'] = datetime.utcnow().isoformat()\n        \n        if 'result' in data:\n            task['result'] = data['result']\n        \n        logger.info(f"Updated task: {task_id}")\n        return jsonify(task), 200\n    except Exception as e:\n        logger.error(f"Error updating task: {str(e)}")\n        return jsonify({'error': str(e)}), 400\n\n@app.route('/api/tasks/<task_id>', methods=['DELETE'])\ndef delete_task(task_id):\n    """Delete a task"""\n    if task_id not in tasks:\n        return jsonify({'error': 'Task not found'}), 404\n    \n    del tasks[task_id]\n    logger.info(f"Deleted task: {task_id}")\n    return jsonify({'message': 'Task deleted'}), 200\n\n# ============================================\n# Status & Health Endpoints\n# ============================================\n\n@app.route('/api/status', methods=['GET'])\ndef status():\n    """Get system status"""\n    running_tasks = sum(1 for t in tasks.values() if t['status'] == 'running')\n    completed_tasks = sum(1 for t in tasks.values() if t['status'] == 'completed')\n    idle_agents = sum(1 for a in agents.values() if a['status'] == 'idle')\n    \n    return jsonify({\n        'status': 'running',\n        'timestamp': datetime.utcnow().isoformat(),\n        'agents': {\n            'total': len(agents),\n            'idle': idle_agents,\n            'active': len(agents) - idle_agents\n        },\n        'tasks': {\n            'total': len(tasks),\n            'running': running_tasks,\n            'completed': completed_tasks,\n            'pending': len(tasks) - running_tasks - completed_tasks\n        }\n    }), 200\n\n@app.route('/api/health', methods=['GET'])\ndef health():\n    """Health check endpoint"""\n    return jsonify({\n        'status': 'healthy',\n        'timestamp': datetime.utcnow().isoformat(),\n        'uptime': 'running'\n    }), 200\n\n# ============================================\n# Workforce Management Endpoints\n# ============================================\n\n@app.route('/api/workforce/assign', methods=['POST'])\ndef assign_task_to_agent():\n    """Assign a task to an agent"""\n    try:\n        data = request.json\n        task_id = data.get('task_id')\n        agent_id = data.get('agent_id')\n        \n        if task_id not in tasks:\n            return jsonify({'error': 'Task not found'}), 404\n        if agent_id not in agents:\n            return jsonify({'error': 'Agent not found'}), 404\n        \n        task = tasks[task_id]\n        agent = agents[agent_id]\n        \n        task['agent_id'] = agent_id\n        task['status'] = 'assigned'\n        agent['status'] = 'busy'\n        \n        logger.info(f"Assigned task {task_id} to agent {agent_id}")\n        return jsonify({'task': task, 'agent': agent}), 200\n    except Exception as e:\n        logger.error(f"Error assigning task: {str(e)}")\n        return jsonify({'error': str(e)}), 400\n\n@app.route('/api/workforce/summary', methods=['GET'])\ndef workforce_summary():\n    """Get workforce summary and statistics"""\n    agent_capabilities = {}\n    for agent in agents.values():\n        for cap in agent.get('capabilities', []):\n            if cap not in agent_capabilities:\n                agent_capabilities[cap] = 0\n            agent_capabilities[cap] += 1\n    \n    return jsonify({\n        'agents_count': len(agents),\n        'tasks_count': len(tasks),\n        'capabilities': agent_capabilities,\n        'agents': list(agents.values()),\n        'tasks': list(tasks.values())\n    }), 200\n\n# ============================================\n# Error Handlers\n# ============================================\n\n@app.errorhandler(404)\ndef not_found(error):\n    """Handle 404 errors"""\n    return jsonify({'error': 'Resource not found'}), 404\n\n@app.errorhandler(500)\ndef internal_error(error):\n    """Handle 500 errors"""\n    logger.error(f"Internal server error: {str(error)}")\n    return jsonify({'error': 'Internal server error'}), 500\n\n# ============================================\n# Main Entry Point\n# ============================================\n\nif __name__ == '__main__':\n    logger.info("Starting open-claw API server...")\n    app.run(host='0.0.0.0', port=8080, debug=False)\n
+from flask import Flask, jsonify, request, current_app
+from datetime import datetime
+import uuid
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def create_app(config=None):
+    app = Flask(__name__)
+
+    # Load config
+    from src.config import Config, TestingConfig
+    if config == 'testing':
+        app.config.from_object(TestingConfig)
+    else:
+        app.config.from_object(Config)
+
+    # In-memory storage
+    app.agents = {}
+    app.tasks = {}
+
+    # Initialize Fortress engine
+    from src.fortress.engine import FortressV2Production
+    fortress_config = app.config.get('FORTRESS')
+    try:
+        engine = FortressV2Production(
+            data_dir=getattr(fortress_config, 'data_dir', '/tmp/fortress'),
+            max_workers=getattr(fortress_config, 'max_workers', 4),
+            sandbox_timeout=getattr(fortress_config, 'sandbox_timeout', 30),
+        )
+        app.extensions['fortress_engine'] = engine
+        logger.info("Fortress v2 engine initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize Fortress engine: {e}")
+
+    # Register Fortress blueprint
+    from src.routes.fortress import fortress_bp
+    app.register_blueprint(fortress_bp)
+
+    # Setup request logging
+    from src.monitoring.logging_config import setup_request_logging
+    setup_request_logging(app)
+
+    # ============================================
+    # Agent Management Endpoints
+    # ============================================
+
+    @app.route('/api/agents', methods=['POST'])
+    def create_agent():
+        """Create a new agent"""
+        try:
+            data = request.json
+            agent_id = str(uuid.uuid4())
+
+            agent = {
+                'id': agent_id,
+                'name': data.get('name', 'Agent'),
+                'type': data.get('type', 'generic'),
+                'status': 'idle',
+                'created_at': datetime.utcnow().isoformat(),
+                'capabilities': data.get('capabilities', []),
+                'tasks_completed': 0
+            }
+
+            current_app.agents[agent_id] = agent
+            logger.info(f"Created agent: {agent_id}")
+            return jsonify(agent), 201
+        except Exception as e:
+            logger.error(f"Error creating agent: {str(e)}")
+            return jsonify({'error': str(e)}), 400
+
+    @app.route('/api/agents', methods=['GET'])
+    def list_agents():
+        """List all agents"""
+        return jsonify(list(current_app.agents.values())), 200
+
+    @app.route('/api/agents/<agent_id>', methods=['GET'])
+    def get_agent(agent_id):
+        """Get details of a specific agent"""
+        agent = current_app.agents.get(agent_id)
+        if not agent:
+            return jsonify({'error': 'Agent not found'}), 404
+        return jsonify(agent), 200
+
+    @app.route('/api/agents/<agent_id>', methods=['PUT'])
+    def update_agent(agent_id):
+        """Update agent status or properties"""
+        try:
+            if agent_id not in current_app.agents:
+                return jsonify({'error': 'Agent not found'}), 404
+
+            data = request.json
+            agent = current_app.agents[agent_id]
+
+            if 'status' in data:
+                agent['status'] = data['status']
+            if 'capabilities' in data:
+                agent['capabilities'] = data['capabilities']
+
+            logger.info(f"Updated agent: {agent_id}")
+            return jsonify(agent), 200
+        except Exception as e:
+            logger.error(f"Error updating agent: {str(e)}")
+            return jsonify({'error': str(e)}), 400
+
+    @app.route('/api/agents/<agent_id>', methods=['DELETE'])
+    def delete_agent(agent_id):
+        """Delete an agent"""
+        if agent_id not in current_app.agents:
+            return jsonify({'error': 'Agent not found'}), 404
+
+        del current_app.agents[agent_id]
+        logger.info(f"Deleted agent: {agent_id}")
+        return jsonify({'message': 'Agent deleted'}), 200
+
+    # ============================================
+    # Task Management Endpoints
+    # ============================================
+
+    @app.route('/api/tasks', methods=['POST'])
+    def submit_task():
+        """Submit a new task"""
+        try:
+            data = request.json
+            task_id = str(uuid.uuid4())
+
+            task = {
+                'id': task_id,
+                'name': data.get('name', 'Unnamed Task'),
+                'description': data.get('description', ''),
+                'agent_id': data.get('agent_id'),
+                'status': 'pending',
+                'priority': data.get('priority', 'normal'),
+                'created_at': datetime.utcnow().isoformat(),
+                'started_at': None,
+                'completed_at': None,
+                'result': None
+            }
+
+            current_app.tasks[task_id] = task
+            logger.info(f"Created task: {task_id}")
+            return jsonify(task), 201
+        except Exception as e:
+            logger.error(f"Error creating task: {str(e)}")
+            return jsonify({'error': str(e)}), 400
+
+    @app.route('/api/tasks', methods=['GET'])
+    def list_tasks():
+        """List all tasks with optional filtering"""
+        status_filter = request.args.get('status')
+        agent_filter = request.args.get('agent_id')
+
+        filtered_tasks = list(current_app.tasks.values())
+
+        if status_filter:
+            filtered_tasks = [t for t in filtered_tasks if t['status'] == status_filter]
+        if agent_filter:
+            filtered_tasks = [t for t in filtered_tasks if t['agent_id'] == agent_filter]
+
+        return jsonify(filtered_tasks), 200
+
+    @app.route('/api/tasks/<task_id>', methods=['GET'])
+    def get_task(task_id):
+        """Get details of a specific task"""
+        task = current_app.tasks.get(task_id)
+        if not task:
+            return jsonify({'error': 'Task not found'}), 404
+        return jsonify(task), 200
+
+    @app.route('/api/tasks/<task_id>', methods=['PUT'])
+    def update_task(task_id):
+        """Update task status or result"""
+        try:
+            if task_id not in current_app.tasks:
+                return jsonify({'error': 'Task not found'}), 404
+
+            data = request.json
+            task = current_app.tasks[task_id]
+
+            if 'status' in data:
+                task['status'] = data['status']
+                if data['status'] == 'running':
+                    task['started_at'] = datetime.utcnow().isoformat()
+                elif data['status'] == 'completed':
+                    task['completed_at'] = datetime.utcnow().isoformat()
+
+            if 'result' in data:
+                task['result'] = data['result']
+
+            logger.info(f"Updated task: {task_id}")
+            return jsonify(task), 200
+        except Exception as e:
+            logger.error(f"Error updating task: {str(e)}")
+            return jsonify({'error': str(e)}), 400
+
+    @app.route('/api/tasks/<task_id>', methods=['DELETE'])
+    def delete_task(task_id):
+        """Delete a task"""
+        if task_id not in current_app.tasks:
+            return jsonify({'error': 'Task not found'}), 404
+
+        del current_app.tasks[task_id]
+        logger.info(f"Deleted task: {task_id}")
+        return jsonify({'message': 'Task deleted'}), 200
+
+    # ============================================
+    # Status & Health Endpoints
+    # ============================================
+
+    @app.route('/api/status', methods=['GET'])
+    def status():
+        """Get system status"""
+        agents = current_app.agents
+        tasks = current_app.tasks
+        running_tasks = sum(1 for t in tasks.values() if t['status'] == 'running')
+        completed_tasks = sum(1 for t in tasks.values() if t['status'] == 'completed')
+        idle_agents = sum(1 for a in agents.values() if a['status'] == 'idle')
+
+        return jsonify({
+            'status': 'running',
+            'timestamp': datetime.utcnow().isoformat(),
+            'agents': {
+                'total': len(agents),
+                'idle': idle_agents,
+                'active': len(agents) - idle_agents
+            },
+            'tasks': {
+                'total': len(tasks),
+                'running': running_tasks,
+                'completed': completed_tasks,
+                'pending': len(tasks) - running_tasks - completed_tasks
+            }
+        }), 200
+
+    @app.route('/api/health', methods=['GET'])
+    def health():
+        """Health check endpoint"""
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.utcnow().isoformat(),
+            'uptime': 'running'
+        }), 200
+
+    @app.route('/api/v1/health', methods=['GET'])
+    def health_v1():
+        """Enhanced health check with Fortress status"""
+        engine = app.extensions.get('fortress_engine')
+        fortress_status = 'unavailable'
+        fortress_stats = {}
+        if engine:
+            try:
+                fortress_stats = engine.get_stats()
+                fortress_status = 'healthy'
+            except Exception:
+                fortress_status = 'degraded'
+
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.utcnow().isoformat(),
+            'uptime': 'running',
+            'fortress': {
+                'status': fortress_status,
+                'stats': fortress_stats,
+            }
+        }), 200
+
+    # ============================================
+    # Workforce Management Endpoints
+    # ============================================
+
+    @app.route('/api/workforce/assign', methods=['POST'])
+    def assign_task_to_agent():
+        """Assign a task to an agent"""
+        try:
+            data = request.json
+            task_id = data.get('task_id')
+            agent_id = data.get('agent_id')
+
+            if task_id not in current_app.tasks:
+                return jsonify({'error': 'Task not found'}), 404
+            if agent_id not in current_app.agents:
+                return jsonify({'error': 'Agent not found'}), 404
+
+            task = current_app.tasks[task_id]
+            agent = current_app.agents[agent_id]
+
+            task['agent_id'] = agent_id
+            task['status'] = 'assigned'
+            agent['status'] = 'busy'
+
+            logger.info(f"Assigned task {task_id} to agent {agent_id}")
+            return jsonify({'task': task, 'agent': agent}), 200
+        except Exception as e:
+            logger.error(f"Error assigning task: {str(e)}")
+            return jsonify({'error': str(e)}), 400
+
+    @app.route('/api/workforce/summary', methods=['GET'])
+    def workforce_summary():
+        """Get workforce summary and statistics"""
+        agents = current_app.agents
+        tasks = current_app.tasks
+        agent_capabilities = {}
+        for agent in agents.values():
+            for cap in agent.get('capabilities', []):
+                if cap not in agent_capabilities:
+                    agent_capabilities[cap] = 0
+                agent_capabilities[cap] += 1
+
+        return jsonify({
+            'agents_count': len(agents),
+            'tasks_count': len(tasks),
+            'capabilities': agent_capabilities,
+            'agents': list(agents.values()),
+            'tasks': list(tasks.values())
+        }), 200
+
+    # ============================================
+    # Error Handlers
+    # ============================================
+
+    @app.errorhandler(404)
+    def not_found(error):
+        """Handle 404 errors"""
+        return jsonify({'error': 'Resource not found'}), 404
+
+    @app.errorhandler(500)
+    def internal_error(error):
+        """Handle 500 errors"""
+        logger.error(f"Internal server error: {str(error)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+    return app
+
+
+if __name__ == '__main__':
+    app = create_app()
+    app.run(host='0.0.0.0', port=8080, debug=False)
