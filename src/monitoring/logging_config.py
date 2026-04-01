@@ -43,12 +43,14 @@ def setup_request_logging(app: Flask) -> None:
 
     @app.after_request
     def after_request(response):
-        duration = time.time() - getattr(g, 'start_time', time.time())
-        app.logger.info(json.dumps({
+        duration = time.time() - getattr(g, 'start_time', None) if hasattr(g, 'start_time') else None
+        log_entry = {
             "type": "request",
             "method": request.method,
             "path": request.path,
             "status": response.status_code,
-            "duration_ms": round(duration * 1000, 2),
-        }))
+        }
+        if duration is not None:
+            log_entry["duration_ms"] = round(duration * 1000, 2)
+        app.logger.info(json.dumps(log_entry))
         return response

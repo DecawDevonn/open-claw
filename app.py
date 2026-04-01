@@ -245,7 +245,7 @@ def create_app(config=None):
     @app.route('/api/v1/health', methods=['GET'])
     def health_v1():
         """Enhanced health check with Fortress status"""
-        engine = app.extensions.get('fortress_engine')
+        engine = current_app.extensions.get('fortress_engine')
         fortress_status = 'unavailable'
         fortress_stats = {}
         if engine:

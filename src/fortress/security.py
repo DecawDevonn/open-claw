@@ -13,7 +13,7 @@ DANGEROUS_PATTERNS = [
     r"mkfs",
     r"dd\s+if=",
     r":(){ :|: & };:",
-    r"sudo\s+rm",
+    r"\bsudo\b",
     r"/etc/passwd",
     r"/etc/shadow",
 ]

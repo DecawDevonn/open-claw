@@ -19,6 +19,8 @@ def _timestamp() -> str:
 class FortressV2Production:
     """Production-ready Fortress v2 engine with thread-safe operations."""
 
+    MAX_FACT_OUTPUT_LENGTH = 200
+
     def __init__(self, data_dir: str = "/tmp/fortress", max_workers: int = 4,
                  allowed_commands: Optional[List[str]] = None, sandbox_timeout: int = 30):
         self.data_dir = os.path.abspath(data_dir)
@@ -141,9 +143,15 @@ class FortressV2Production:
             self.write_mailbox(agent_id, {"command": command, "result": f"Blocked: {reason}"})
             return {"command": command, "result": f"Blocked: {reason}", "allowed": False}
 
+        import shlex
+        try:
+            cmd_parts = shlex.split(command)
+        except ValueError as e:
+            return {"command": command, "result": f"Invalid command syntax: {e}", "allowed": False}
+
         try:
             result = subprocess.run(
-                command, shell=True, capture_output=True, text=True,
+                cmd_parts, capture_output=True, text=True,
                 timeout=self.sandbox_timeout
             )
             output = result.stdout.strip()
@@ -154,7 +162,7 @@ class FortressV2Production:
         except Exception as e:
             output = f"Error: {e}"
 
-        fact_id = self.add_fact(agent_id, f"{command} -> {output[:200]}")
+        fact_id = self.add_fact(agent_id, f"{command} -> {output[:self.MAX_FACT_OUTPUT_LENGTH]}")
         self.write_mailbox(agent_id, {"command": command, "result": output})
         return {"command": command, "result": output, "allowed": True, "fact_id": fact_id}
 
