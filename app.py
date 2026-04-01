@@ -1,31 +1,46 @@
 """Open Claw - Agent Management System.
 
 Production-ready Flask API with JWT authentication, input validation,
-structured logging, pagination, and API versioning.
+structured logging, pagination, rate limiting, CORS, and API versioning.
 """
 
-from flask import Flask, jsonify, request
+import json
+import logging
+import os
+import time
+import uuid
+from datetime import datetime, timedelta
+from functools import wraps
+from typing import Any, Dict, List, Optional, Tuple
+
+from flask import Flask, g, jsonify, request
+from flask_cors import CORS
 from flask_jwt_extended import (
     JWTManager,
     create_access_token,
     create_refresh_token,
-    jwt_required,
+    get_jwt,
     get_jwt_identity,
+    jwt_required,
 )
-from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime, timedelta
-from functools import wraps
-import uuid
-import logging
-import os
-import json
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.security import check_password_hash, generate_password_hash
+
+from apscheduler.schedulers.background import BackgroundScheduler
+
+from storage import get_storage
+
+
+# Module-level limiter — decorators reference this before init_app is called.
+limiter = Limiter(key_func=get_remote_address, default_limits=["200 per day", "100 per minute"])
 
 
 # ============================================
 # Application Factory
 # ============================================
 
-def create_app(config=None):
+def create_app(config: Optional[Dict] = None) -> Flask:
     """Application factory function."""
     app = Flask(__name__)
 
@@ -37,10 +52,25 @@ def create_app(config=None):
         'LOG_LEVEL': os.environ.get('LOG_LEVEL', 'INFO'),
         'DEBUG': os.environ.get('FLASK_DEBUG', 'false').lower() == 'true',
         'TESTING': False,
+        'MONGODB_URI': os.environ.get('MONGODB_URI', ''),
+        'REDIS_URL': os.environ.get('REDIS_URL', 'memory://'),
+        'CORS_ORIGINS': os.environ.get('CORS_ORIGINS', '*'),
+        'AGENT_HEARTBEAT_TIMEOUT': int(os.environ.get('AGENT_HEARTBEAT_TIMEOUT', 60)),
+        'RATELIMIT_ENABLED': True,
     })
 
     if config:
         app.config.update(config)
+
+    # Disable rate limiting in test mode
+    if app.config.get('TESTING'):
+        app.config['RATELIMIT_ENABLED'] = False
+
+    # CORS
+    CORS(app, origins=app.config['CORS_ORIGINS'].split(','))
+
+    # Rate limiter
+    limiter.init_app(app)
 
     # Initialize JWT
     jwt = JWTManager(app)
@@ -48,18 +78,40 @@ def create_app(config=None):
     # Configure structured logging
     _setup_logging(app)
 
-    # In-memory storage (swap with DB adapter in production)
-    app.users = {}
-    app.agents = {}
-    app.tasks = {}
+    # Storage backend (in-memory for dev/test, MongoDB for production)
+    app.storage = get_storage(app.config.get('MONGODB_URI') or None)
 
     # Register all routes and error handlers
-    _register_routes(app, jwt)
+    _register_routes(app, jwt, limiter)
+
+    # Heartbeat scheduler (skip in tests to avoid background threads)
+    if not app.config.get('TESTING'):
+        _start_heartbeat_scheduler(app)
 
     return app
 
 
-def _setup_logging(app):
+def _start_heartbeat_scheduler(app: Flask) -> BackgroundScheduler:
+    """Start a background scheduler that marks stale agents as offline."""
+    timeout = int(app.config.get('AGENT_HEARTBEAT_TIMEOUT', 60))
+    scheduler = BackgroundScheduler(daemon=True)
+
+    def _check_heartbeats() -> None:
+        cutoff = datetime.utcnow() - timedelta(seconds=timeout)
+        for agent in app.storage.list_agents():
+            last_seen = agent.get('last_seen_at')
+            if last_seen:
+                last_seen_dt = datetime.fromisoformat(last_seen.rstrip('Z'))
+                if last_seen_dt < cutoff and agent['status'] != 'offline':
+                    agent['status'] = 'offline'
+                    app.storage.save_agent(agent)
+
+    scheduler.add_job(_check_heartbeats, 'interval', seconds=30)
+    scheduler.start()
+    return scheduler
+
+
+def _setup_logging(app: Flask) -> None:
     """Configure structured JSON logging."""
     log_level = app.config.get('LOG_LEVEL', 'INFO')
 
@@ -82,7 +134,7 @@ def _setup_logging(app):
     app.logger.setLevel(getattr(logging, log_level, logging.INFO))
 
 
-def _paginate(items, page, per_page):
+def _paginate(items: List, page: int, per_page: int) -> Dict:
     """Return a paginated slice of a list with metadata."""
     total = len(items)
     start = (page - 1) * per_page
@@ -97,12 +149,12 @@ def _paginate(items, page, per_page):
     }
 
 
-def _validate_required(data, fields):
+def _validate_required(data: Dict, fields: List[str]) -> List[str]:
     """Return list of missing required field names."""
     return [f for f in fields if f not in data or data[f] is None]
 
 
-def _parse_pagination(args):
+def _parse_pagination(args: Any) -> Tuple[int, int]:
     """Parse and validate page/per_page query parameters."""
     page = int(args.get('page', 1))
     per_page = min(int(args.get('per_page', 20)), 100)
@@ -113,16 +165,41 @@ def _parse_pagination(args):
     return page, per_page
 
 
-def _register_routes(app, jwt):
+def _register_routes(app: Flask, jwt: JWTManager, limiter: Limiter) -> None:
     """Register all application routes and error handlers."""
 
-    def admin_required(fn):
+    # --- JWT blocklist ---
+
+    @jwt.token_in_blocklist_loader
+    def check_if_token_revoked(jwt_header: Dict, jwt_payload: Dict) -> bool:
+        return app.storage.is_token_revoked(jwt_payload['jti'])
+
+    # --- Request/response logging middleware ---
+
+    @app.before_request
+    def _before_request() -> None:
+        g.start_time = time.monotonic()
+
+    @app.after_request
+    def _after_request(response: Any) -> Any:
+        latency_ms = round((time.monotonic() - g.start_time) * 1000, 2)
+        if not app.config.get('TESTING'):
+            app.logger.info(json.dumps({
+                'event': 'request',
+                'method': request.method,
+                'path': request.path,
+                'status': response.status_code,
+                'latency_ms': latency_ms,
+            }))
+        return response
+
+    def admin_required(fn: Any) -> Any:
         """Decorator: require admin role."""
         @wraps(fn)
         @jwt_required()
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             identity = get_jwt_identity()
-            user = app.users.get(identity)
+            user = app.storage.get_user(identity)
             if not user or user.get('role') != 'admin':
                 return jsonify({'error': 'Admin access required', 'code': 'FORBIDDEN'}), 403
             return fn(*args, **kwargs)
@@ -133,7 +210,8 @@ def _register_routes(app, jwt):
     # ============================================
 
     @app.route('/api/v1/auth/register', methods=['POST'])
-    def register():
+    @limiter.limit('10 per minute')
+    def register() -> Tuple[Any, int]:
         """Register a new user."""
         try:
             data = request.get_json(silent=True)
@@ -161,9 +239,8 @@ def _register_routes(app, jwt):
                     'code': 'INVALID_INPUT',
                 }), 400
 
-            for user in app.users.values():
-                if user['username'] == username:
-                    return jsonify({'error': 'Username already exists', 'code': 'CONFLICT'}), 409
+            if app.storage.get_user_by_username(username):
+                return jsonify({'error': 'Username already exists', 'code': 'CONFLICT'}), 409
 
             user_id = str(uuid.uuid4())
             user = {
@@ -173,7 +250,7 @@ def _register_routes(app, jwt):
                 'role': data.get('role', 'user'),
                 'created_at': datetime.utcnow().isoformat() + 'Z',
             }
-            app.users[user_id] = user
+            app.storage.save_user(user)
             app.logger.info(json.dumps({'event': 'user_registered', 'user_id': user_id}))
             return jsonify({
                 'message': 'User registered successfully',
@@ -185,7 +262,8 @@ def _register_routes(app, jwt):
             return jsonify({'error': 'Internal server error', 'code': 'INTERNAL_ERROR'}), 500
 
     @app.route('/api/v1/auth/login', methods=['POST'])
-    def login():
+    @limiter.limit('10 per minute')
+    def login() -> Tuple[Any, int]:
         """Authenticate user and return JWT tokens."""
         try:
             data = request.get_json(silent=True)
@@ -202,11 +280,7 @@ def _register_routes(app, jwt):
             username = data['username']
             password = data['password']
 
-            user = None
-            for u in app.users.values():
-                if u['username'] == username:
-                    user = u
-                    break
+            user = app.storage.get_user_by_username(username)
 
             if not user or not check_password_hash(user['password_hash'], password):
                 return jsonify({'error': 'Invalid credentials', 'code': 'UNAUTHORIZED'}), 401
@@ -231,10 +305,10 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/auth/refresh', methods=['POST'])
     @jwt_required(refresh=True)
-    def refresh_token():
+    def refresh_token() -> Tuple[Any, int]:
         """Refresh access token using a refresh token."""
         identity = get_jwt_identity()
-        user = app.users.get(identity)
+        user = app.storage.get_user(identity)
         if not user:
             return jsonify({'error': 'User not found', 'code': 'NOT_FOUND'}), 404
         access_token = create_access_token(
@@ -243,13 +317,22 @@ def _register_routes(app, jwt):
         )
         return jsonify({'access_token': access_token}), 200
 
+    @app.route('/api/v1/auth/logout', methods=['POST'])
+    @jwt_required()
+    @limiter.limit('30 per minute')
+    def logout() -> Tuple[Any, int]:
+        """Revoke the current access token."""
+        jti = get_jwt()['jti']
+        app.storage.revoke_token(jti)
+        return jsonify({'message': 'Successfully logged out'}), 200
+
     # ============================================
     # Agent Management Endpoints
     # ============================================
 
     @app.route('/api/v1/agents', methods=['POST'])
     @jwt_required()
-    def create_agent():
+    def create_agent() -> Tuple[Any, int]:
         """Create a new agent."""
         try:
             data = request.get_json(silent=True)
@@ -276,8 +359,9 @@ def _register_routes(app, jwt):
                 'created_at': datetime.utcnow().isoformat() + 'Z',
                 'capabilities': capabilities,
                 'tasks_completed': 0,
+                'last_seen_at': None,
             }
-            app.agents[agent_id] = agent
+            app.storage.save_agent(agent)
             app.logger.info(json.dumps({'event': 'agent_created', 'agent_id': agent_id}))
             return jsonify(agent), 201
         except Exception as e:
@@ -286,18 +370,18 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/agents', methods=['GET'])
     @jwt_required()
-    def list_agents():
+    def list_agents() -> Tuple[Any, int]:
         """List all agents with pagination, filtering, and sorting."""
         try:
             page, per_page = _parse_pagination(request.args)
-        except ValueError as e:
+        except ValueError:
             return jsonify({'error': 'Invalid pagination parameters', 'code': 'INVALID_INPUT'}), 400
 
         status_filter = request.args.get('status')
         sort_by = request.args.get('sort_by', 'created_at')
         sort_order = request.args.get('sort_order', 'desc')
 
-        agent_list = list(app.agents.values())
+        agent_list = app.storage.list_agents()
         if status_filter:
             agent_list = [a for a in agent_list if a['status'] == status_filter]
 
@@ -311,26 +395,26 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/agents/<agent_id>', methods=['GET'])
     @jwt_required()
-    def get_agent(agent_id):
+    def get_agent(agent_id: str) -> Tuple[Any, int]:
         """Get details of a specific agent."""
-        agent = app.agents.get(agent_id)
+        agent = app.storage.get_agent(agent_id)
         if not agent:
             return jsonify({'error': 'Agent not found', 'code': 'NOT_FOUND'}), 404
         return jsonify(agent), 200
 
     @app.route('/api/v1/agents/<agent_id>', methods=['PUT'])
     @jwt_required()
-    def update_agent(agent_id):
+    def update_agent(agent_id: str) -> Tuple[Any, int]:
         """Update agent status or properties."""
         try:
-            if agent_id not in app.agents:
+            agent = app.storage.get_agent(agent_id)
+            if not agent:
                 return jsonify({'error': 'Agent not found', 'code': 'NOT_FOUND'}), 404
 
             data = request.get_json(silent=True)
             if not data:
                 return jsonify({'error': 'Request body required', 'code': 'INVALID_INPUT'}), 400
 
-            agent = app.agents[agent_id]
             valid_statuses = ('idle', 'busy', 'offline', 'error')
 
             if 'status' in data:
@@ -349,6 +433,7 @@ def _register_routes(app, jwt):
             if 'name' in data:
                 agent['name'] = str(data['name']).strip()
 
+            app.storage.save_agent(agent)
             app.logger.info(json.dumps({'event': 'agent_updated', 'agent_id': agent_id}))
             return jsonify(agent), 200
         except Exception as e:
@@ -357,13 +442,25 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/agents/<agent_id>', methods=['DELETE'])
     @jwt_required()
-    def delete_agent(agent_id):
+    def delete_agent(agent_id: str) -> Tuple[Any, int]:
         """Delete an agent."""
-        if agent_id not in app.agents:
+        if not app.storage.delete_agent(agent_id):
             return jsonify({'error': 'Agent not found', 'code': 'NOT_FOUND'}), 404
-        del app.agents[agent_id]
         app.logger.info(json.dumps({'event': 'agent_deleted', 'agent_id': agent_id}))
         return jsonify({'message': 'Agent deleted successfully'}), 200
+
+    @app.route('/api/v1/agents/<agent_id>/heartbeat', methods=['POST'])
+    @jwt_required()
+    def agent_heartbeat(agent_id: str) -> Tuple[Any, int]:
+        """Update agent last_seen_at and revive if offline."""
+        agent = app.storage.get_agent(agent_id)
+        if not agent:
+            return jsonify({'error': 'Agent not found', 'code': 'NOT_FOUND'}), 404
+        agent['last_seen_at'] = datetime.utcnow().isoformat() + 'Z'
+        if agent['status'] == 'offline':
+            agent['status'] = 'idle'
+        app.storage.save_agent(agent)
+        return jsonify(agent), 200
 
     # ============================================
     # Task Management Endpoints
@@ -371,7 +468,7 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/tasks', methods=['POST'])
     @jwt_required()
-    def submit_task():
+    def submit_task() -> Tuple[Any, int]:
         """Submit a new task."""
         try:
             data = request.get_json(silent=True)
@@ -394,7 +491,7 @@ def _register_routes(app, jwt):
                 }), 400
 
             agent_id = data.get('agent_id')
-            if agent_id and agent_id not in app.agents:
+            if agent_id and not app.storage.get_agent(agent_id):
                 return jsonify({'error': 'Agent not found', 'code': 'NOT_FOUND'}), 404
 
             task_id = str(uuid.uuid4())
@@ -410,7 +507,7 @@ def _register_routes(app, jwt):
                 'completed_at': None,
                 'result': None,
             }
-            app.tasks[task_id] = task
+            app.storage.save_task(task)
             app.logger.info(json.dumps({'event': 'task_created', 'task_id': task_id}))
             return jsonify(task), 201
         except Exception as e:
@@ -419,11 +516,11 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/tasks', methods=['GET'])
     @jwt_required()
-    def list_tasks():
+    def list_tasks() -> Tuple[Any, int]:
         """List all tasks with pagination, filtering, and sorting."""
         try:
             page, per_page = _parse_pagination(request.args)
-        except ValueError as e:
+        except ValueError:
             return jsonify({'error': 'Invalid pagination parameters', 'code': 'INVALID_INPUT'}), 400
 
         status_filter = request.args.get('status')
@@ -431,7 +528,7 @@ def _register_routes(app, jwt):
         sort_by = request.args.get('sort_by', 'created_at')
         sort_order = request.args.get('sort_order', 'desc')
 
-        task_list = list(app.tasks.values())
+        task_list = app.storage.list_tasks()
         if status_filter:
             task_list = [t for t in task_list if t['status'] == status_filter]
         if agent_filter:
@@ -447,26 +544,26 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/tasks/<task_id>', methods=['GET'])
     @jwt_required()
-    def get_task(task_id):
+    def get_task(task_id: str) -> Tuple[Any, int]:
         """Get details of a specific task."""
-        task = app.tasks.get(task_id)
+        task = app.storage.get_task(task_id)
         if not task:
             return jsonify({'error': 'Task not found', 'code': 'NOT_FOUND'}), 404
         return jsonify(task), 200
 
     @app.route('/api/v1/tasks/<task_id>', methods=['PUT'])
     @jwt_required()
-    def update_task(task_id):
+    def update_task(task_id: str) -> Tuple[Any, int]:
         """Update task status or result."""
         try:
-            if task_id not in app.tasks:
+            task = app.storage.get_task(task_id)
+            if not task:
                 return jsonify({'error': 'Task not found', 'code': 'NOT_FOUND'}), 404
 
             data = request.get_json(silent=True)
             if not data:
                 return jsonify({'error': 'Request body required', 'code': 'INVALID_INPUT'}), 400
 
-            task = app.tasks[task_id]
             valid_statuses = ('pending', 'assigned', 'running', 'completed', 'failed', 'cancelled')
 
             if 'status' in data:
@@ -484,6 +581,7 @@ def _register_routes(app, jwt):
             if 'result' in data:
                 task['result'] = data['result']
 
+            app.storage.save_task(task)
             app.logger.info(json.dumps({'event': 'task_updated', 'task_id': task_id}))
             return jsonify(task), 200
         except Exception as e:
@@ -492,11 +590,10 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/tasks/<task_id>', methods=['DELETE'])
     @jwt_required()
-    def delete_task(task_id):
+    def delete_task(task_id: str) -> Tuple[Any, int]:
         """Delete a task."""
-        if task_id not in app.tasks:
+        if not app.storage.delete_task(task_id):
             return jsonify({'error': 'Task not found', 'code': 'NOT_FOUND'}), 404
-        del app.tasks[task_id]
         app.logger.info(json.dumps({'event': 'task_deleted', 'task_id': task_id}))
         return jsonify({'message': 'Task deleted successfully'}), 200
 
@@ -506,7 +603,7 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/health', methods=['GET'])
     @app.route('/api/health', methods=['GET'])
-    def health():
+    def health() -> Tuple[Any, int]:
         """Health check endpoint."""
         return jsonify({
             'status': 'healthy',
@@ -516,25 +613,27 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/status', methods=['GET'])
     @app.route('/api/status', methods=['GET'])
-    def status():
+    def status() -> Tuple[Any, int]:
         """Get system status."""
-        running_tasks = sum(1 for t in app.tasks.values() if t['status'] == 'running')
-        completed_tasks = sum(1 for t in app.tasks.values() if t['status'] == 'completed')
-        idle_agents = sum(1 for a in app.agents.values() if a['status'] == 'idle')
+        all_tasks = app.storage.list_tasks()
+        all_agents = app.storage.list_agents()
+        running_tasks = sum(1 for t in all_tasks if t['status'] == 'running')
+        completed_tasks = sum(1 for t in all_tasks if t['status'] == 'completed')
+        idle_agents = sum(1 for a in all_agents if a['status'] == 'idle')
         return jsonify({
             'status': 'running',
             'timestamp': datetime.utcnow().isoformat() + 'Z',
             'version': '1.0.0',
             'agents': {
-                'total': len(app.agents),
+                'total': len(all_agents),
                 'idle': idle_agents,
-                'active': len(app.agents) - idle_agents,
+                'active': len(all_agents) - idle_agents,
             },
             'tasks': {
-                'total': len(app.tasks),
+                'total': len(all_tasks),
                 'running': running_tasks,
                 'completed': completed_tasks,
-                'pending': len(app.tasks) - running_tasks - completed_tasks,
+                'pending': len(all_tasks) - running_tasks - completed_tasks,
             },
         }), 200
 
@@ -544,7 +643,7 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/workforce/assign', methods=['POST'])
     @jwt_required()
-    def assign_task_to_agent():
+    def assign_task_to_agent() -> Tuple[Any, int]:
         """Assign a task to an agent."""
         try:
             data = request.get_json(silent=True)
@@ -561,16 +660,18 @@ def _register_routes(app, jwt):
             task_id = data['task_id']
             agent_id = data['agent_id']
 
-            if task_id not in app.tasks:
+            task = app.storage.get_task(task_id)
+            if not task:
                 return jsonify({'error': 'Task not found', 'code': 'NOT_FOUND'}), 404
-            if agent_id not in app.agents:
+            agent = app.storage.get_agent(agent_id)
+            if not agent:
                 return jsonify({'error': 'Agent not found', 'code': 'NOT_FOUND'}), 404
 
-            task = app.tasks[task_id]
-            agent = app.agents[agent_id]
             task['agent_id'] = agent_id
             task['status'] = 'assigned'
             agent['status'] = 'busy'
+            app.storage.save_task(task)
+            app.storage.save_agent(agent)
 
             app.logger.info(json.dumps({
                 'event': 'task_assigned', 'task_id': task_id, 'agent_id': agent_id,
@@ -582,19 +683,21 @@ def _register_routes(app, jwt):
 
     @app.route('/api/v1/workforce/summary', methods=['GET'])
     @jwt_required()
-    def workforce_summary():
+    def workforce_summary() -> Tuple[Any, int]:
         """Get workforce summary and statistics."""
-        agent_capabilities = {}
-        for agent in app.agents.values():
+        all_agents = app.storage.list_agents()
+        all_tasks = app.storage.list_tasks()
+        agent_capabilities: Dict[str, int] = {}
+        for agent in all_agents:
             for cap in agent.get('capabilities', []):
                 agent_capabilities[cap] = agent_capabilities.get(cap, 0) + 1
 
         return jsonify({
-            'agents_count': len(app.agents),
-            'tasks_count': len(app.tasks),
+            'agents_count': len(all_agents),
+            'tasks_count': len(all_tasks),
             'capabilities': agent_capabilities,
-            'agents': list(app.agents.values()),
-            'tasks': list(app.tasks.values()),
+            'agents': all_agents,
+            'tasks': all_tasks,
         }), 200
 
     # ============================================
@@ -602,29 +705,33 @@ def _register_routes(app, jwt):
     # ============================================
 
     @app.errorhandler(404)
-    def not_found(error):
+    def not_found(error: Any) -> Tuple[Any, int]:
         return jsonify({'error': 'Resource not found', 'code': 'NOT_FOUND'}), 404
 
     @app.errorhandler(405)
-    def method_not_allowed(error):
+    def method_not_allowed(error: Any) -> Tuple[Any, int]:
         return jsonify({'error': 'Method not allowed', 'code': 'METHOD_NOT_ALLOWED'}), 405
 
     @app.errorhandler(500)
-    def internal_error(error):
+    def internal_error(error: Any) -> Tuple[Any, int]:
         app.logger.error(f'Internal server error: {str(error)}')
         return jsonify({'error': 'Internal server error', 'code': 'INTERNAL_ERROR'}), 500
 
     @jwt.unauthorized_loader
-    def unauthorized_callback(reason):
+    def unauthorized_callback(reason: str) -> Tuple[Any, int]:
         return jsonify({'error': 'Authorization required', 'code': 'UNAUTHORIZED', 'reason': reason}), 401
 
     @jwt.invalid_token_loader
-    def invalid_token_callback(reason):
+    def invalid_token_callback(reason: str) -> Tuple[Any, int]:
         return jsonify({'error': 'Invalid token', 'code': 'INVALID_TOKEN', 'reason': reason}), 422
 
     @jwt.expired_token_loader
-    def expired_token_callback(jwt_header, jwt_data):
+    def expired_token_callback(jwt_header: Dict, jwt_data: Dict) -> Tuple[Any, int]:
         return jsonify({'error': 'Token has expired', 'code': 'TOKEN_EXPIRED'}), 401
+
+    @jwt.revoked_token_loader
+    def revoked_token_callback(jwt_header: Dict, jwt_data: Dict) -> Tuple[Any, int]:
+        return jsonify({'error': 'Token has been revoked', 'code': 'TOKEN_REVOKED'}), 401
 
 
 # ============================================
@@ -637,3 +744,6 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     application.logger.info(json.dumps({'event': 'server_start', 'host': host, 'port': port}))
     application.run(host=host, port=port)
+else:
+    # WSGI entrypoint for gunicorn / production
+    application = create_app()

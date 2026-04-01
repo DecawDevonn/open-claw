@@ -600,13 +600,10 @@ class TestAppFactory:
         assert app.config['SECRET_KEY'] == 'my-custom-secret'
 
     def test_create_app_has_storage(self):
+        from storage import MemoryStorage
         app = create_app({'TESTING': True})
-        assert hasattr(app, 'users')
-        assert hasattr(app, 'agents')
-        assert hasattr(app, 'tasks')
-        assert isinstance(app.users, dict)
-        assert isinstance(app.agents, dict)
-        assert isinstance(app.tasks, dict)
+        assert hasattr(app, 'storage')
+        assert isinstance(app.storage, MemoryStorage)
 
     def test_separate_app_instances_have_independent_storage(self):
         """Each app instance must have isolated storage."""
@@ -675,3 +672,53 @@ class TestAdminRole:
         })
         assert resp.status_code == 200
         assert resp.get_json()['role'] == 'admin'
+
+
+# ============================================
+# Logout / Token Revocation
+# ============================================
+
+class TestLogout:
+    def test_logout_success(self, client, auth_headers):
+        resp = client.post('/api/v1/auth/logout', headers=auth_headers)
+        assert resp.status_code == 200
+        assert 'message' in resp.get_json()
+
+    def test_logout_requires_auth(self, client):
+        resp = client.post('/api/v1/auth/logout')
+        assert resp.status_code == 401
+
+    def test_revoked_token_rejected(self, client, auth_headers):
+        client.post('/api/v1/auth/logout', headers=auth_headers)
+        # After logout, the same token must be rejected
+        resp = client.get('/api/v1/agents', headers=auth_headers)
+        assert resp.status_code == 401
+
+
+# ============================================
+# Agent Heartbeat
+# ============================================
+
+class TestHeartbeat:
+    def test_heartbeat_updates_last_seen(self, client, auth_headers, sample_agent):
+        agent_id = sample_agent['id']
+        resp = client.post(f'/api/v1/agents/{agent_id}/heartbeat', headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['last_seen_at'] is not None
+
+    def test_heartbeat_revives_offline_agent(self, client, auth_headers, sample_agent):
+        agent_id = sample_agent['id']
+        client.put(f'/api/v1/agents/{agent_id}', json={'status': 'offline'}, headers=auth_headers)
+        resp = client.post(f'/api/v1/agents/{agent_id}/heartbeat', headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.get_json()['status'] == 'idle'
+
+    def test_heartbeat_not_found(self, client, auth_headers):
+        resp = client.post('/api/v1/agents/nonexistent/heartbeat', headers=auth_headers)
+        assert resp.status_code == 404
+
+    def test_heartbeat_requires_auth(self, client, sample_agent):
+        agent_id = sample_agent['id']
+        resp = client.post(f'/api/v1/agents/{agent_id}/heartbeat')
+        assert resp.status_code == 401

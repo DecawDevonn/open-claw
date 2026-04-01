@@ -38,7 +38,12 @@ jobs:
 
       - name: Lint with flake8
         run: |
-          flake8 app.py --max-line-length=120
+          flake8 app.py storage/ --max-line-length=120
+
+      - name: Type-check (mypy)
+        run: |
+          pip install mypy types-Flask
+          mypy app.py storage/ --ignore-missing-imports --no-strict-optional
 
       - name: Run tests with coverage
         run: |

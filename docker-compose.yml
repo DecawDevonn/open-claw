@@ -6,13 +6,20 @@ services:
     ports:
       - '8080:8080'
     environment:
-      - FLASK_ENV=development
+      - FLASK_ENV=production
       - FLASK_DEBUG=false
       - SECRET_KEY=${SECRET_KEY:-dev-secret-key}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-jwt-secret}
       - LOG_LEVEL=INFO
       - HOST=0.0.0.0
       - PORT=8080
+      - MONGODB_URI=mongodb://mongo:27017/open-claw
+      - REDIS_URL=${REDIS_URL:-memory://}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - AGENT_HEARTBEAT_TIMEOUT=${AGENT_HEARTBEAT_TIMEOUT:-60}
+    depends_on:
+      mongo:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
       interval: 30s
@@ -20,3 +27,20 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
+
+  mongo:
+    image: mongo:7.0
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
