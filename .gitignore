@@ -1,0 +1,14 @@
+# Python
+*.py[cod]
+__pycache__/
+*~
+
+# Python Environment
+.env
+.venv/
+.venv*
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-*
