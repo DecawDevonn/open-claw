@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "openclaw"
+version = "1.0.0"
+description = "OpenClaw - AI Agent Workforce System"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "DecawDevonn", email = "your_email@example.com" }]
+requires-python = ">=3.8"
+keywords = ["ai", "agents", "workforce", "automation", "flask", "api"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
+]
+dependencies = [
+    "flask>=2.0.0",
+    "requests>=2.28.0",
+    "click>=8.1.0",
+    "python-dotenv>=0.21.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "flake8>=6.0.0",
+    "black>=23.0.0",
+]
+docs = [
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/DecawDevonn/open-claw"
+Repository = "https://github.com/DecawDevonn/open-claw"
+"Bug Tracker" = "https://github.com/DecawDevonn/open-claw/issues"
+
+[project.scripts]
+openclaw = "openclaw.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["openclaw*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.flake8]
+max-line-length = 120
+exclude = [".git", "__pycache__", "dist", "build", "*.egg-info", ".venv", "venv"]
