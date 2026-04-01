@@ -1,5 +1,5 @@
 from flask import Flask, jsonify, request, current_app
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 import logging
 
@@ -58,7 +58,7 @@ def create_app(config=None):
                 'name': data.get('name', 'Agent'),
                 'type': data.get('type', 'generic'),
                 'status': 'idle',
-                'created_at': datetime.utcnow().isoformat(),
+                'created_at': datetime.now(timezone.utc).isoformat(),
                 'capabilities': data.get('capabilities', []),
                 'tasks_completed': 0
             }
@@ -132,7 +132,7 @@ def create_app(config=None):
                 'agent_id': data.get('agent_id'),
                 'status': 'pending',
                 'priority': data.get('priority', 'normal'),
-                'created_at': datetime.utcnow().isoformat(),
+                'created_at': datetime.now(timezone.utc).isoformat(),
                 'started_at': None,
                 'completed_at': None,
                 'result': None
@@ -181,9 +181,9 @@ def create_app(config=None):
             if 'status' in data:
                 task['status'] = data['status']
                 if data['status'] == 'running':
-                    task['started_at'] = datetime.utcnow().isoformat()
+                    task['started_at'] = datetime.now(timezone.utc).isoformat()
                 elif data['status'] == 'completed':
-                    task['completed_at'] = datetime.utcnow().isoformat()
+                    task['completed_at'] = datetime.now(timezone.utc).isoformat()
 
             if 'result' in data:
                 task['result'] = data['result']
@@ -219,7 +219,7 @@ def create_app(config=None):
 
         return jsonify({
             'status': 'running',
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'agents': {
                 'total': len(agents),
                 'idle': idle_agents,
@@ -238,7 +238,7 @@ def create_app(config=None):
         """Health check endpoint"""
         return jsonify({
             'status': 'healthy',
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'uptime': 'running'
         }), 200
 
@@ -257,7 +257,7 @@ def create_app(config=None):
 
         return jsonify({
             'status': 'healthy',
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'uptime': 'running',
             'fortress': {
                 'status': fortress_status,

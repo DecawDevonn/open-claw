@@ -4,7 +4,7 @@ import os
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from src.fortress.security import validate_command
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def _timestamp() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat()
 
 
 class FortressV2Production:
@@ -32,6 +32,7 @@ class FortressV2Production:
 
         self._lock = threading.RLock()
         self._fact_graph: Dict[str, Dict] = {}
+        self._fact_counter: int = 0
         self._context_window: List[Dict] = []
         self._mailbox: Dict[str, List[Dict]] = {}
         self._worktrees: Dict[str, Dict] = {}
@@ -63,7 +64,8 @@ class FortressV2Production:
     def add_fact(self, agent: str, fact: str, tags: Optional[List[str]] = None,
                  related: Optional[List[str]] = None, importance: float = 1.0) -> str:
         with self._lock:
-            fid = f"f{len(self._fact_graph) + 1}"
+            self._fact_counter += 1
+            fid = f"f{self._fact_counter}"
             entry = {
                 "id": fid,
                 "timestamp": _timestamp(),

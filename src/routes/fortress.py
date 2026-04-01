@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, request, current_app
-from datetime import datetime
+from datetime import datetime, timezone
 
 fortress_bp = Blueprint('fortress', __name__, url_prefix='/api/v1/fortress')
 
@@ -25,7 +25,7 @@ def execute_command(agent_id):
         'result': result['result'],
         'allowed': result.get('allowed', False),
         'fact_id': result.get('fact_id', ''),
-        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'timestamp': datetime.now(timezone.utc).isoformat(),
     }), 200
 
 

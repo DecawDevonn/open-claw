@@ -1,7 +1,7 @@
 import time
 import threading
 from typing import Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class MetricsCollector:
@@ -51,7 +51,7 @@ class MetricsCollector:
                     }
                     for k, v in self._histograms.items()
                 },
-                "collected_at": datetime.utcnow().isoformat() + "Z",
+                "collected_at": datetime.now(timezone.utc).isoformat(),
             }
 
 
