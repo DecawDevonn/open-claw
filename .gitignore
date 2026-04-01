@@ -1,14 +1,30 @@
 # Python
 *.py[cod]
 __pycache__/
+*.egg-info/
+dist/
+build/
 *~
 
 # Python Environment
 .env
 .venv/
 .venv*
+venv/
+env/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
 
 # IDEs
 .vscode/
 .idea/
 *.sublime-*
+
+# Misc
+*.log
+*.swp
+.DS_Store
