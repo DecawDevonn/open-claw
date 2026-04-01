@@ -68,7 +68,7 @@ def create_app(config=None):
             return jsonify(agent), 201
         except Exception as e:
             logger.error(f"Error creating agent: {str(e)}")
-            return jsonify({'error': str(e)}), 400
+            return jsonify({'error': 'Failed to create agent'}), 400
 
     @app.route('/api/agents', methods=['GET'])
     def list_agents():
@@ -102,7 +102,7 @@ def create_app(config=None):
             return jsonify(agent), 200
         except Exception as e:
             logger.error(f"Error updating agent: {str(e)}")
-            return jsonify({'error': str(e)}), 400
+            return jsonify({'error': 'Failed to update agent'}), 400
 
     @app.route('/api/agents/<agent_id>', methods=['DELETE'])
     def delete_agent(agent_id):
@@ -143,7 +143,7 @@ def create_app(config=None):
             return jsonify(task), 201
         except Exception as e:
             logger.error(f"Error creating task: {str(e)}")
-            return jsonify({'error': str(e)}), 400
+            return jsonify({'error': 'Failed to create task'}), 400
 
     @app.route('/api/tasks', methods=['GET'])
     def list_tasks():
@@ -192,7 +192,7 @@ def create_app(config=None):
             return jsonify(task), 200
         except Exception as e:
             logger.error(f"Error updating task: {str(e)}")
-            return jsonify({'error': str(e)}), 400
+            return jsonify({'error': 'Failed to update task'}), 400
 
     @app.route('/api/tasks/<task_id>', methods=['DELETE'])
     def delete_task(task_id):
@@ -293,7 +293,7 @@ def create_app(config=None):
             return jsonify({'task': task, 'agent': agent}), 200
         except Exception as e:
             logger.error(f"Error assigning task: {str(e)}")
-            return jsonify({'error': str(e)}), 400
+            return jsonify({'error': 'Failed to assign task'}), 400
 
     @app.route('/api/workforce/summary', methods=['GET'])
     def workforce_summary():
