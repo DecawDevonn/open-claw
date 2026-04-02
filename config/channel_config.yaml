@@ -1,0 +1,43 @@
+# OpenClaw Channel Configuration
+# ──────────────────────────────
+# Copy to config/channel_config.yaml and fill in your values.
+# All secrets should be set in .env — reference them with !ENV tags or load
+# them at runtime via config.settings.get_settings().
+
+channels:
+  telegram:
+    enabled: true
+    bot_token: ""           # Set TELEGRAM_BOT_TOKEN in .env
+    webhook_url: ""         # Public HTTPS URL for Bot API webhook
+
+  slack:
+    enabled: false
+    signing_secret: ""      # Set SLACK_SIGNING_SECRET in .env
+    bot_token: ""           # Set SLACK_BOT_TOKEN in .env
+
+  web:
+    enabled: true
+    cors_origins:
+      - "http://localhost:3000"
+      - "http://localhost:8080"
+
+  voice:
+    enabled: false
+    assemblyai_key: ""      # Set ASSEMBLYAI_API_KEY in .env
+    provider: "assemblyai"  # assemblyai | whisper
+
+queues:
+  backend: "redis"          # redis | memory (in-process, no deps)
+  channel: "openclaw:messages"
+  host: "localhost"
+  port: 6379
+  db: 0
+
+orchestration:
+  heartbeat_interval: 60    # seconds between proactive task ticks
+  cron_tick: 1.0            # seconds between cron scheduler polls
+  max_concurrent_agents: 10
+
+logging:
+  level: "INFO"             # DEBUG | INFO | WARNING | ERROR
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"

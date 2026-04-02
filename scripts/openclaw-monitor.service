@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenClaw Multi-Node Update Monitor
+Documentation=https://github.com/DecawDevonn/open-claw/blob/main/docs/UPDATE_MONITOR.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+
+# Load credentials from a root-owned, mode-0600 file.
+# Create it with: sudo install -m 0600 /dev/null /etc/openclaw/notify.env
+EnvironmentFile=-/etc/openclaw/notify.env
+
+# Path to the script — adjust if you installed to a different location.
+ExecStart=/opt/openclaw/scripts/openclaw_multi_channel_update.sh
+
+# Restart automatically on failure; wait 60 s before each retry.
+Restart=on-failure
+RestartSec=60
+
+# Append all output to the same log file the script uses.
+StandardOutput=append:/var/log/openclaw_update.log
+StandardError=append:/var/log/openclaw_update.log
+
+[Install]
+WantedBy=multi-user.target

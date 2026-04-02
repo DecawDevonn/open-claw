@@ -1,2 +1,19 @@
-Flask
+Flask>=3.0
+gunicorn>=21.0
+python-dotenv>=1.0.1
+PyJWT>=2.12.0
+cryptography>=46.0.5
+requests>=2.32.3
+sentry-sdk[flask]>=2.6.0
+redis>=5.0.0
+PyYAML>=6.0.1
+
+# Install extras as needed:
+# pip install pymongo>=4.0             # MongoDB storage backend
+# pip install pinecone-client>=3.2.2   # Pinecone vector DB
+# pip install elevenlabs>=1.3.0        # ElevenLabs TTS SDK (optional; REST used by default)
+# pip install assemblyai>=0.26.0       # AssemblyAI SDK (optional; REST used by default)
+# pip install chromadb>=1.0.0          # Sapphire local vector memory (ChromaDB)
+
 pytest
+pytest-cov
