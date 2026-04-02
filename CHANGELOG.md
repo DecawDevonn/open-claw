@@ -10,6 +10,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Multi-agent skeleton** — production-ready async pipeline implementing the OpenClaw + Claw0 architecture:
+  - `agents/` Python package — `BaseAgent`, `DefaultAgent`, `WeatherAgent` (Open-Meteo), `EmailAgent`
+  - `channels/` package — `TelegramChannel`, `SlackChannel`, `WebChannel`, `VoiceChannel` (AssemblyAI)
+  - `gateway/` package — keyword-based `router` + `Dispatcher` (async queue enqueue)
+  - `memory/` package — `SessionStore` (TTL-aware), `ContextManager` (rolling context window), `OpenAIEmbeddings`
+  - `tools/` package — `BaseTool` ABC, `OpenAITool`, `EmailTool` (SendGrid / SMTP), `custom_tools/` dir
+  - `delivery/` package — `Messenger` (channel registry), `RetryQueue` (exponential back-off), `formatters` (Telegram / Slack / voice)
+  - `orchestration/` package — `MultiAgentOrchestrator`, `heartbeat_task`, `CronScheduler`, `queue_consumer`
+  - `loggers/` package — stdlib-wrapper helpers (`log_info/error/warning/debug`), `MetricsCollector` (counters + gauges)
+  - `queues/` package — async `RedisQueue` (uses `redis.asyncio`, no aioredis dep)
+  - `config/` package — `Settings` dataclass (all env vars), `channel_config.yaml` template
+  - `scripts/start_server.py` — async entry-point wiring agents, queue consumer, heartbeat and cron
+  - `scripts/init_db.py` — one-shot storage initialisation (MongoDB, Redis, ChromaDB)
+- **72 new tests** in `tests/test_skeleton.py` covering all skeleton modules (198 total)
+- `redis>=5.0.0` and `PyYAML>=6.0.1` added to `requirements.txt`
 - **Sapphire Cognitive Memory** (`openclaw/services/sapphire.py`): persistent ChromaDB-backed
   vector store implementing the Sapphire Protocol — save, search, inject, reflect, delete, list
 - **`AIService.chat()`** — Cognitive Wrapper that retrieves relevant memories, injects them into

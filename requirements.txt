@@ -5,6 +5,8 @@ PyJWT>=2.12.0
 cryptography>=46.0.5
 requests>=2.32.3
 sentry-sdk[flask]>=2.6.0
+redis>=5.0.0
+PyYAML>=6.0.1
 
 # Install extras as needed:
 # pip install pymongo>=4.0             # MongoDB storage backend
