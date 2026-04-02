@@ -320,3 +320,296 @@ def test_integrations_airtable_no_key(client, auth_headers):
 def test_integrations_sheets_missing_fields(client, auth_headers):
     resp = client.post('/api/integrations/sheets/append', json={}, headers=auth_headers)
     assert resp.status_code == 400
+
+
+# ── /api/leads/* ──────────────────────────────────────────────────────────────
+
+def test_leads_capture_no_name_or_email(client):
+    resp = client.post('/api/leads', json={'phone': '+15555555555'})
+    assert resp.status_code == 400
+
+
+def test_leads_capture_with_name(client):
+    resp = client.post('/api/leads', json={'name': 'Alice', 'source': 'website'})
+    assert resp.status_code == 201
+    data = resp.get_json()
+    assert data['name'] == 'Alice'
+    assert data['source'] == 'website'
+    assert 'id' in data
+    assert data['status'] == 'new'
+
+
+def test_leads_capture_with_email(client):
+    resp = client.post('/api/leads', json={'email': 'bob@example.com'})
+    assert resp.status_code == 201
+    assert resp.get_json()['email'] == 'bob@example.com'
+
+
+def test_leads_list_requires_auth(client):
+    resp = client.get('/api/leads')
+    assert resp.status_code == 401
+
+
+def test_leads_list(client, auth_headers):
+    client.post('/api/leads', json={'name': 'Lead1'})
+    client.post('/api/leads', json={'name': 'Lead2', 'source': 'ads'})
+    resp = client.get('/api/leads', headers=auth_headers)
+    assert resp.status_code == 200
+    assert len(resp.get_json()) >= 2
+
+
+def test_leads_list_filter_by_source(client, auth_headers):
+    client.post('/api/leads', json={'name': 'Organic Lead', 'source': 'organic'})
+    resp = client.get('/api/leads?source=organic', headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert all(l['source'] == 'organic' for l in data)
+
+
+def test_leads_get(client, auth_headers):
+    create_resp = client.post('/api/leads', json={'name': 'Charlie'})
+    lead_id = create_resp.get_json()['id']
+    resp = client.get(f'/api/leads/{lead_id}', headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.get_json()['id'] == lead_id
+
+
+def test_leads_get_not_found(client, auth_headers):
+    resp = client.get('/api/leads/nonexistent-id', headers=auth_headers)
+    assert resp.status_code == 404
+
+
+def test_leads_update(client, auth_headers):
+    create_resp = client.post('/api/leads', json={'name': 'Dave'})
+    lead_id = create_resp.get_json()['id']
+    resp = client.put(
+        f'/api/leads/{lead_id}',
+        json={'status': 'contacted', 'company': 'Acme'},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['status'] == 'contacted'
+    assert data['company'] == 'Acme'
+
+
+def test_leads_update_not_found(client, auth_headers):
+    resp = client.put('/api/leads/bad-id', json={'status': 'new'}, headers=auth_headers)
+    assert resp.status_code == 404
+
+
+def test_leads_score(client, auth_headers):
+    create_resp = client.post('/api/leads', json={
+        'name': 'Eve', 'email': 'eve@example.com',
+        'message': 'I want to buy now, send me a quote',
+        'source': 'ads',
+    })
+    lead_id = create_resp.get_json()['id']
+    resp = client.post(f'/api/leads/{lead_id}/score', headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert 0 <= data['score'] <= 100
+    assert data['intent'] in ('high', 'medium', 'low')
+
+
+def test_leads_score_not_found(client, auth_headers):
+    resp = client.post('/api/leads/nope/score', headers=auth_headers)
+    assert resp.status_code == 404
+
+
+def test_leads_route(client, auth_headers):
+    create_resp = client.post('/api/leads', json={'name': 'Frank'})
+    lead_id = create_resp.get_json()['id']
+    resp = client.post(f'/api/leads/{lead_id}/route', headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # No agents registered → status should be unassigned
+    assert data['status'] == 'unassigned'
+
+
+def test_leads_route_not_found(client, auth_headers):
+    resp = client.post('/api/leads/nope/route', headers=auth_headers)
+    assert resp.status_code == 404
+
+
+def test_leads_follow_up(client, auth_headers):
+    create_resp = client.post('/api/leads', json={'name': 'Grace'})
+    lead_id = create_resp.get_json()['id']
+    resp = client.post(f'/api/leads/{lead_id}/follow-up', headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.get_json()['follow_up_count'] == 1
+
+
+def test_leads_delete(client, auth_headers):
+    create_resp = client.post('/api/leads', json={'name': 'Heidi'})
+    lead_id = create_resp.get_json()['id']
+    resp = client.delete(f'/api/leads/{lead_id}', headers=auth_headers)
+    assert resp.status_code == 200
+    # Confirm it's gone
+    assert client.get(f'/api/leads/{lead_id}', headers=auth_headers).status_code == 404
+
+
+# ── /api/comms/* ──────────────────────────────────────────────────────────────
+
+def test_comms_sms_missing_fields(client, auth_headers):
+    resp = client.post('/api/comms/sms', json={'to': '+15555555555'}, headers=auth_headers)
+    assert resp.status_code == 400
+
+
+def test_comms_sms_no_key(client, auth_headers):
+    resp = client.post(
+        '/api/comms/sms',
+        json={'to': '+15555555555', 'body': 'Hello'},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 503
+
+
+def test_comms_whatsapp_missing_fields(client, auth_headers):
+    resp = client.post('/api/comms/whatsapp', json={'to': '+15555555555'}, headers=auth_headers)
+    assert resp.status_code == 400
+
+
+def test_comms_whatsapp_no_key(client, auth_headers):
+    resp = client.post(
+        '/api/comms/whatsapp',
+        json={'to': '+15555555555', 'body': 'Hi there'},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 503
+
+
+def test_comms_call_missing_fields(client, auth_headers):
+    resp = client.post('/api/comms/call', json={'to': '+15555555555'}, headers=auth_headers)
+    assert resp.status_code == 400
+
+
+def test_comms_call_no_key(client, auth_headers):
+    resp = client.post(
+        '/api/comms/call',
+        json={'to': '+15555555555', 'twiml_url': 'https://example.com/twiml'},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 503
+
+
+def test_comms_email_missing_fields(client, auth_headers):
+    resp = client.post(
+        '/api/comms/email',
+        json={'to': 'x@x.com', 'subject': 'Hi'},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+
+
+def test_comms_email_no_key(client, auth_headers):
+    resp = client.post(
+        '/api/comms/email',
+        json={'to': 'x@x.com', 'subject': 'Hello', 'html_body': '<p>Hi</p>'},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 503
+
+
+# ── /api/analytics/* ──────────────────────────────────────────────────────────
+
+def test_analytics_track_missing_event_type(client, auth_headers):
+    resp = client.post('/api/analytics/events', json={}, headers=auth_headers)
+    assert resp.status_code == 400
+
+
+def test_analytics_track_event(client, auth_headers):
+    resp = client.post(
+        '/api/analytics/events',
+        json={'event_type': 'payment_completed', 'data': {'amount': 99}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    data = resp.get_json()
+    assert data['event_type'] == 'payment_completed'
+    assert 'id' in data
+    assert 'timestamp' in data
+
+
+def test_analytics_metrics(client, auth_headers):
+    client.post(
+        '/api/analytics/events',
+        json={'event_type': 'lead_captured'},
+        headers=auth_headers,
+    )
+    resp = client.get('/api/analytics/metrics', headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert 'total_events' in data
+    assert 'by_type' in data
+    assert 'conversion_rate' in data
+
+
+def test_analytics_metrics_with_since(client, auth_headers):
+    resp = client.get('/api/analytics/metrics?since=2099-01-01T00:00:00', headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.get_json()['total_events'] == 0
+
+
+def test_analytics_feedback_log_missing_fields(client, auth_headers):
+    resp = client.post('/api/analytics/feedback', json={'agent_id': 'a1'}, headers=auth_headers)
+    assert resp.status_code == 400
+
+
+def test_analytics_feedback_log(client, auth_headers):
+    resp = client.post(
+        '/api/analytics/feedback',
+        json={'agent_id': 'a1', 'task_id': 't1', 'outcome': 'success', 'score': 0.9},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    data = resp.get_json()
+    assert data['outcome'] == 'success'
+    assert data['score'] == 0.9
+
+
+def test_analytics_feedback_summary(client, auth_headers):
+    client.post(
+        '/api/analytics/feedback',
+        json={'agent_id': 'a2', 'task_id': 't2', 'outcome': 'failure', 'score': 0.2},
+        headers=auth_headers,
+    )
+    resp = client.get('/api/analytics/feedback', headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert 'total_feedback' in data
+    assert 'outcomes' in data
+    assert 'mean_score' in data
+
+
+def test_analytics_feedback_summary_by_agent(client, auth_headers):
+    client.post(
+        '/api/analytics/feedback',
+        json={'agent_id': 'agent-x', 'task_id': 't3', 'outcome': 'success', 'score': 1.0},
+        headers=auth_headers,
+    )
+    resp = client.get('/api/analytics/feedback?agent_id=agent-x', headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.get_json()['agent_id'] == 'agent-x'
+
+
+# ── /api/audit ────────────────────────────────────────────────────────────────
+
+def test_audit_list_requires_auth(client):
+    resp = client.get('/api/audit')
+    assert resp.status_code == 401
+
+
+def test_audit_list(client, auth_headers):
+    # Make a couple of requests first so there are entries
+    client.get('/api/health')
+    resp = client.get('/api/audit', headers=auth_headers)
+    assert resp.status_code == 200
+    entries = resp.get_json()
+    assert isinstance(entries, list)
+    assert len(entries) > 0
+    entry = entries[0]
+    assert 'method' in entry
+    assert 'path' in entry
+    assert 'status' in entry
+    assert 'timestamp' in entry

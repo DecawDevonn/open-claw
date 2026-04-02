@@ -10,6 +10,9 @@ from openclaw.services.auth import AuthService, require_auth
 from openclaw.services.voice import VoiceService
 from openclaw.services.search import SearchService
 from openclaw.services.integrations import IntegrationsService
+from openclaw.services.leads import LeadsService
+from openclaw.services.comms import CommsService
+from openclaw.services.analytics import AnalyticsService
 from openclaw.services.monitoring import init_monitoring, health_payload
 from storage import get_storage
 
@@ -69,9 +72,41 @@ def create_app():
         airtable_base_id=settings.airtable_base_id,
         google_sheets_api_key=settings.google_sheets_api_key,
     )
+    _leads = LeadsService(storage=_store, ai_service=_ai)
+    _comms = CommsService(
+        twilio_account_sid=settings.twilio_account_sid,
+        twilio_auth_token=settings.twilio_auth_token,
+        twilio_from_number=settings.twilio_from_number,
+        twilio_whatsapp_from=settings.twilio_whatsapp_from,
+        sendgrid_api_key=settings.sendgrid_api_key,
+        sendgrid_from_email=settings.sendgrid_from_email,
+    )
+    _analytics = AnalyticsService(storage=_store)
 
     # Register AuthService on the app so require_auth can reach it
     app.extensions["auth_service"] = _auth
+
+    # ── Audit-log middleware ──────────────────────────────────────────────────
+
+    @app.after_request
+    def _audit_log(response):
+        """Record every non-static request to the audit log."""
+        try:
+            actor = getattr(g, "current_user", {})
+            actor_id = actor.get("id") if isinstance(actor, dict) else None
+            entry = {
+                "id": str(uuid.uuid4()),
+                "method": request.method,
+                "path": request.path,
+                "status": response.status_code,
+                "actor_id": actor_id,
+                "remote_addr": request.remote_addr,
+                "timestamp": _now(),
+            }
+            _store.save_audit_entry(entry)
+        except Exception:
+            pass  # never let audit logging break a response
+        return response
 
     # ============================================
     # Agent Management Endpoints
@@ -747,6 +782,267 @@ def create_app():
     def integrations_services():
         """List which external service integrations are currently configured."""
         return jsonify({'configured': settings.configured_services()}), 200
+
+    # ============================================
+    # Lead Management Endpoints
+    # ============================================
+
+    @app.route('/api/leads', methods=['POST'])
+    def leads_capture():
+        """Capture a new inbound lead."""
+        try:
+            data = request.json or {}
+            if not data.get('name') and not data.get('email'):
+                return jsonify({'error': 'name or email is required'}), 400
+            lead = _leads.capture(data)
+            _analytics.track_event('lead_captured', {'lead_id': lead['id'], 'source': lead['source']})
+            return jsonify(lead), 201
+        except Exception as e:
+            logger.error(f"Lead capture error: {e}")
+            return jsonify({'error': 'Lead capture failed'}), 400
+
+    @app.route('/api/leads', methods=['GET'])
+    @require_auth
+    def leads_list():
+        """List leads with optional status/source filters."""
+        status = request.args.get('status')
+        source = request.args.get('source')
+        return jsonify(_leads.list(status=status, source=source)), 200
+
+    @app.route('/api/leads/<lead_id>', methods=['GET'])
+    @require_auth
+    def leads_get(lead_id):
+        """Get a specific lead by ID."""
+        lead = _leads.get(lead_id)
+        if not lead:
+            return jsonify({'error': 'Lead not found'}), 404
+        return jsonify(lead), 200
+
+    @app.route('/api/leads/<lead_id>', methods=['PUT'])
+    @require_auth
+    def leads_update(lead_id):
+        """Update lead fields."""
+        try:
+            data = request.json or {}
+            lead = _leads.update(lead_id, data)
+            if not lead:
+                return jsonify({'error': 'Lead not found'}), 404
+            return jsonify(lead), 200
+        except Exception as e:
+            logger.error(f"Lead update error: {e}")
+            return jsonify({'error': 'Lead update failed'}), 400
+
+    @app.route('/api/leads/<lead_id>/score', methods=['POST'])
+    @require_auth
+    def leads_score(lead_id):
+        """AI-score a lead for quality and purchase intent."""
+        try:
+            lead = _leads.score(lead_id)
+            _analytics.track_event(
+                'lead_scored',
+                {'lead_id': lead_id, 'score': lead['score'], 'intent': lead['intent']},
+            )
+            return jsonify(lead), 200
+        except KeyError:
+            return jsonify({'error': 'Lead not found'}), 404
+        except Exception as e:
+            logger.error(f"Lead scoring error: {e}")
+            return jsonify({'error': 'Lead scoring failed'}), 500
+
+    @app.route('/api/leads/<lead_id>/route', methods=['POST'])
+    @require_auth
+    def leads_route(lead_id):
+        """Route a lead to the best available agent."""
+        try:
+            lead = _leads.route(lead_id)
+            _analytics.track_event('lead_routed', {'lead_id': lead_id, 'agent_id': lead.get('assigned_agent')})
+            return jsonify(lead), 200
+        except KeyError:
+            return jsonify({'error': 'Lead not found'}), 404
+        except Exception as e:
+            logger.error(f"Lead routing error: {e}")
+            return jsonify({'error': 'Lead routing failed'}), 500
+
+    @app.route('/api/leads/<lead_id>/follow-up', methods=['POST'])
+    @require_auth
+    def leads_follow_up(lead_id):
+        """Record a follow-up interaction for a lead."""
+        lead = _leads.record_follow_up(lead_id)
+        if not lead:
+            return jsonify({'error': 'Lead not found'}), 404
+        _analytics.track_event('follow_up_sent', {'lead_id': lead_id})
+        return jsonify(lead), 200
+
+    @app.route('/api/leads/<lead_id>', methods=['DELETE'])
+    @require_auth
+    def leads_delete(lead_id):
+        """Delete a lead."""
+        if not _leads.delete(lead_id):
+            return jsonify({'error': 'Lead not found'}), 404
+        return jsonify({'message': 'Lead deleted'}), 200
+
+    # ============================================
+    # Communications Endpoints
+    # ============================================
+
+    @app.route('/api/comms/sms', methods=['POST'])
+    @require_auth
+    def comms_sms():
+        """Send an SMS via Twilio."""
+        try:
+            data = request.json or {}
+            to = data.get('to', '').strip()
+            body = data.get('body', '').strip()
+            if not to or not body:
+                return jsonify({'error': 'to and body are required'}), 400
+            result = _comms.send_sms(to=to, body=body)
+            _analytics.track_event('sms_sent', {'to': to})
+            return jsonify(result), 200
+        except RuntimeError as e:
+            return jsonify({'error': str(e)}), 503
+        except Exception as e:
+            logger.error(f"SMS error: {e}")
+            return jsonify({'error': 'SMS delivery failed'}), 500
+
+    @app.route('/api/comms/whatsapp', methods=['POST'])
+    @require_auth
+    def comms_whatsapp():
+        """Send a WhatsApp message via Twilio."""
+        try:
+            data = request.json or {}
+            to = data.get('to', '').strip()
+            body = data.get('body', '').strip()
+            if not to or not body:
+                return jsonify({'error': 'to and body are required'}), 400
+            result = _comms.send_whatsapp(to=to, body=body)
+            _analytics.track_event('whatsapp_sent', {'to': to})
+            return jsonify(result), 200
+        except RuntimeError as e:
+            return jsonify({'error': str(e)}), 503
+        except Exception as e:
+            logger.error(f"WhatsApp error: {e}")
+            return jsonify({'error': 'WhatsApp delivery failed'}), 500
+
+    @app.route('/api/comms/call', methods=['POST'])
+    @require_auth
+    def comms_call():
+        """Initiate an outbound voice call via Twilio."""
+        try:
+            data = request.json or {}
+            to = data.get('to', '').strip()
+            twiml_url = data.get('twiml_url', '').strip()
+            if not to or not twiml_url:
+                return jsonify({'error': 'to and twiml_url are required'}), 400
+            result = _comms.make_call(to=to, twiml_url=twiml_url)
+            _analytics.track_event('call_initiated', {'to': to})
+            return jsonify(result), 200
+        except RuntimeError as e:
+            return jsonify({'error': str(e)}), 503
+        except Exception as e:
+            logger.error(f"Call error: {e}")
+            return jsonify({'error': 'Call initiation failed'}), 500
+
+    @app.route('/api/comms/email', methods=['POST'])
+    @require_auth
+    def comms_email():
+        """Send a transactional email via SendGrid."""
+        try:
+            data = request.json or {}
+            to = data.get('to', '').strip()
+            subject = data.get('subject', '').strip()
+            html_body = data.get('html_body', '').strip()
+            if not to or not subject or not html_body:
+                return jsonify({'error': 'to, subject, and html_body are required'}), 400
+            result = _comms.send_email(
+                to=to,
+                subject=subject,
+                html_body=html_body,
+                text_body=data.get('text_body'),
+                from_email=data.get('from_email'),
+                from_name=data.get('from_name'),
+            )
+            _analytics.track_event('email_sent', {'to': to, 'subject': subject})
+            return jsonify(result), 200
+        except RuntimeError as e:
+            return jsonify({'error': str(e)}), 503
+        except Exception as e:
+            logger.error(f"Email error: {e}")
+            return jsonify({'error': 'Email delivery failed'}), 500
+
+    # ============================================
+    # Analytics & Optimization Endpoints
+    # ============================================
+
+    @app.route('/api/analytics/events', methods=['POST'])
+    @require_auth
+    def analytics_track():
+        """Track an analytics event."""
+        try:
+            data = request.json or {}
+            event_type = data.get('event_type', '').strip()
+            if not event_type:
+                return jsonify({'error': 'event_type is required'}), 400
+            actor = getattr(g, 'current_user', {})
+            actor_id = actor.get('id') if isinstance(actor, dict) else None
+            event = _analytics.track_event(
+                event_type=event_type,
+                data=data.get('data'),
+                actor_id=actor_id,
+            )
+            return jsonify(event), 201
+        except Exception as e:
+            logger.error(f"Analytics track error: {e}")
+            return jsonify({'error': 'Event tracking failed'}), 400
+
+    @app.route('/api/analytics/metrics', methods=['GET'])
+    @require_auth
+    def analytics_metrics():
+        """Return aggregated performance metrics."""
+        since = request.args.get('since')
+        return jsonify(_analytics.get_metrics(since=since)), 200
+
+    @app.route('/api/analytics/feedback', methods=['POST'])
+    @require_auth
+    def analytics_feedback_log():
+        """Log an AI feedback signal for reinforcement learning."""
+        try:
+            data = request.json or {}
+            agent_id = data.get('agent_id', '').strip()
+            task_id = data.get('task_id', '').strip()
+            outcome = data.get('outcome', '').strip()
+            score = data.get('score')
+            if not agent_id or not task_id or not outcome or score is None:
+                return jsonify({'error': 'agent_id, task_id, outcome, and score are required'}), 400
+            feedback = _analytics.log_feedback(
+                agent_id=agent_id,
+                task_id=task_id,
+                outcome=outcome,
+                score=score,
+                notes=data.get('notes'),
+            )
+            return jsonify(feedback), 201
+        except Exception as e:
+            logger.error(f"Feedback log error: {e}")
+            return jsonify({'error': 'Feedback logging failed'}), 400
+
+    @app.route('/api/analytics/feedback', methods=['GET'])
+    @require_auth
+    def analytics_feedback_summary():
+        """Return feedback summary, optionally filtered by agent."""
+        agent_id = request.args.get('agent_id')
+        return jsonify(_analytics.get_feedback_summary(agent_id=agent_id)), 200
+
+    # ============================================
+    # Audit Log Endpoints
+    # ============================================
+
+    @app.route('/api/audit', methods=['GET'])
+    @require_auth
+    def audit_list():
+        """Return recent audit log entries (most-recent first, up to 200)."""
+        limit = min(int(request.args.get('limit', 200)), 200)
+        entries = _store.list_audit_entries(limit=limit)
+        return jsonify(list(reversed(entries))), 200
 
     # ============================================
     # Error Handlers

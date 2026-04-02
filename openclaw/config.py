@@ -145,6 +145,28 @@ class Settings:
         default_factory=lambda: os.getenv("DISCORD_WEBHOOK_URL")
     )
 
+    # ── Communications — Twilio ───────────────────────────────────────────────
+    twilio_account_sid: Optional[str] = field(
+        default_factory=lambda: os.getenv("TWILIO_ACCOUNT_SID")
+    )
+    twilio_auth_token: Optional[str] = field(
+        default_factory=lambda: os.getenv("TWILIO_AUTH_TOKEN")
+    )
+    twilio_from_number: Optional[str] = field(
+        default_factory=lambda: os.getenv("TWILIO_FROM_NUMBER")
+    )
+    twilio_whatsapp_from: Optional[str] = field(
+        default_factory=lambda: os.getenv("TWILIO_WHATSAPP_FROM")
+    )
+
+    # ── Communications — SendGrid ─────────────────────────────────────────────
+    sendgrid_api_key: Optional[str] = field(
+        default_factory=lambda: os.getenv("SENDGRID_API_KEY")
+    )
+    sendgrid_from_email: Optional[str] = field(
+        default_factory=lambda: os.getenv("SENDGRID_FROM_EMAIL")
+    )
+
     def configured_services(self) -> List[str]:
         """Return names of services that have API keys configured."""
         mapping = {
@@ -159,6 +181,8 @@ class Settings:
             "deepl": self.deepl_api_key,
             "airtable": self.airtable_api_key,
             "sentry": self.sentry_dsn,
+            "twilio": self.twilio_account_sid,
+            "sendgrid": self.sendgrid_api_key,
         }
         return [name for name, key in mapping.items() if key]
 

@@ -18,6 +18,9 @@ class InMemoryStorage(StorageBackend):
         self._agents: Dict[str, Dict] = {}
         self._tasks: Dict[str, Dict] = {}
         self._revoked: set = set()
+        self._leads: Dict[str, Dict] = {}
+        self._events: List[Dict] = []
+        self._audit: List[Dict] = []
 
     # --- Users ---
 
@@ -77,3 +80,36 @@ class InMemoryStorage(StorageBackend):
 
     def is_token_revoked(self, jti: str) -> bool:
         return jti in self._revoked
+
+    # --- Leads ---
+
+    def get_lead(self, lead_id: str) -> Optional[Dict]:
+        return self._leads.get(lead_id)
+
+    def save_lead(self, lead: Dict) -> None:
+        self._leads[lead["id"]] = lead
+
+    def delete_lead(self, lead_id: str) -> bool:
+        if lead_id in self._leads:
+            del self._leads[lead_id]
+            return True
+        return False
+
+    def list_leads(self) -> List[Dict]:
+        return list(self._leads.values())
+
+    # --- Analytics events ---
+
+    def save_event(self, event: Dict) -> None:
+        self._events.append(event)
+
+    def list_events(self) -> List[Dict]:
+        return list(self._events)
+
+    # --- Audit log ---
+
+    def save_audit_entry(self, entry: Dict) -> None:
+        self._audit.append(entry)
+
+    def list_audit_entries(self, limit: int = 200) -> List[Dict]:
+        return list(self._audit[-limit:])

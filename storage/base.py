@@ -70,3 +70,41 @@ class StorageBackend(ABC):
     @abstractmethod
     def is_token_revoked(self, jti: str) -> bool:
         """Return True if the JTI has been revoked."""
+
+    # --- Leads ---
+
+    @abstractmethod
+    def get_lead(self, lead_id: str) -> Optional[Dict]:
+        """Return the lead dict for *lead_id*, or None if not found."""
+
+    @abstractmethod
+    def save_lead(self, lead: Dict) -> None:
+        """Persist *lead* (insert or replace by ``lead['id']``)."""
+
+    @abstractmethod
+    def delete_lead(self, lead_id: str) -> bool:
+        """Delete lead by *lead_id*. Returns True if it existed."""
+
+    @abstractmethod
+    def list_leads(self) -> List[Dict]:
+        """Return all leads."""
+
+    # --- Analytics events ---
+
+    @abstractmethod
+    def save_event(self, event: Dict) -> None:
+        """Persist an analytics *event* (insert only; events are immutable)."""
+
+    @abstractmethod
+    def list_events(self) -> List[Dict]:
+        """Return all analytics events."""
+
+    # --- Audit log ---
+
+    @abstractmethod
+    def save_audit_entry(self, entry: Dict) -> None:
+        """Persist an audit log *entry*."""
+
+    @abstractmethod
+    def list_audit_entries(self, limit: int = 200) -> List[Dict]:
+        """Return up to *limit* most-recent audit log entries."""
