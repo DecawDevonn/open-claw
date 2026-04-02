@@ -84,6 +84,20 @@ class Settings:
     )
     youtube_api_key: Optional[str] = field(default_factory=lambda: os.getenv("YOUTUBE_API_KEY"))
 
+    # ── Sapphire — local ChromaDB memory ─────────────────────────────────────
+    chroma_persist_dir: str = field(
+        default_factory=lambda: os.getenv("CHROMA_PERSIST_DIR", "./chroma_memory")
+    )
+    chroma_collection: str = field(
+        default_factory=lambda: os.getenv("CHROMA_COLLECTION", "sapphire")
+    )
+    sapphire_memory_top_k: int = field(
+        default_factory=lambda: int(os.getenv("SAPPHIRE_MEMORY_TOP_K", "5"))
+    )
+    sapphire_reflection_interval: int = field(
+        default_factory=lambda: int(os.getenv("SAPPHIRE_REFLECTION_INTERVAL", "10"))
+    )
+
     # ── Search / Vector DB ────────────────────────────────────────────────────
     pinecone_api_key: Optional[str] = field(
         default_factory=lambda: os.getenv("PINECONE_API_KEY")

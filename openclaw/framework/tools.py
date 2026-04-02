@@ -102,3 +102,48 @@ def tool(
 
 def get_default_registry() -> ToolRegistry:
     return _default_registry
+
+
+# ── Sapphire save_to_memory tool ──────────────────────────────────────────────
+
+_SAVE_TO_MEMORY_PARAMS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "content": {
+            "type": "string",
+            "description": "The memory to store (a clear, self-contained statement).",
+        },
+        "weight": {
+            "type": "number",
+            "description": "Importance score 0.0–2.0 (default 1.0).",
+        },
+        "tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional categorisation tags.",
+        },
+    },
+    "required": ["content"],
+}
+
+
+def register_save_to_memory(memory_service: Any) -> None:
+    """Register the ``save_to_memory`` tool against *memory_service*.
+
+    Call this once after creating a :class:`~openclaw.services.sapphire.SapphireMemory`
+    instance so agents can call ``save_to_memory`` by name.
+    """
+
+    def _save_to_memory(content: str, weight: float = 1.0, tags: Optional[List[str]] = None, **_: Any) -> str:
+        mid = memory_service.save(content=content, weight=weight, tags=tags or [])
+        return f"Memory saved: {mid}"
+
+    _default_registry.register(
+        name="save_to_memory",
+        fn=_save_to_memory,
+        description=(
+            "Persist an important fact, insight, or piece of context to the "
+            "Sapphire long-term memory store."
+        ),
+        parameters=_SAVE_TO_MEMORY_PARAMS,
+    )

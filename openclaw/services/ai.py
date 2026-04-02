@@ -210,3 +210,90 @@ class AIService:
             )
         )
         return data["translations"][0]["text"]
+
+    # ── Sapphire Cognitive Wrapper ────────────────────────────────────────────
+
+    def chat(
+        self,
+        prompt: str,
+        system: str = "You are DEVONN.AI, a helpful autonomous AI assistant.",
+        max_tokens: int = 1024,
+        temperature: float = 0.7,
+        model: Optional[str] = None,
+        memory_service: Optional[Any] = None,
+        save_response: bool = True,
+    ) -> Dict[str, Any]:
+        """Cognitive Wrapper around :meth:`complete` that integrates Sapphire memory.
+
+        Workflow
+        --------
+        1. If *memory_service* is provided, retrieve the top-K relevant
+           memories for *prompt* and prepend them to the system prompt.
+        2. Call :meth:`complete` with the augmented system prompt.
+        3. Optionally save the assistant's reply as a new memory entry
+           (when *save_response* is True and *memory_service* is provided).
+        4. Return a dict containing the LLM reply, the memories injected,
+           and (when saved) the id of the new memory entry.
+
+        Parameters
+        ----------
+        prompt:
+            The user message / task description.
+        system:
+            Base system prompt.  Memory context is prepended automatically.
+        max_tokens:
+            Token limit for the completion.
+        temperature:
+            Sampling temperature.
+        model:
+            Override the default OpenAI model.
+        memory_service:
+            An optional :class:`~openclaw.services.sapphire.SapphireMemory`
+            instance.  When *None* the method behaves identically to
+            :meth:`complete`.
+        save_response:
+            When True (default) the assistant's reply is saved back to memory
+            after a successful completion.
+
+        Returns
+        -------
+        dict with keys:
+            ``result``         — The assistant reply string.
+            ``memories_used``  — List of memory dicts injected into the prompt.
+            ``memory_saved_id``— Id of the newly saved memory (or None).
+        """
+        memories_used: List[Dict[str, Any]] = []
+        memory_saved_id: Optional[str] = None
+        augmented_system = system
+
+        if memory_service is not None:
+            try:
+                memories_used = memory_service.search(prompt)
+                context_block = memory_service.inject(prompt)
+                if context_block:
+                    augmented_system = f"{system}\n\n{context_block}"
+            except Exception as exc:
+                logger.warning("chat: memory retrieval failed: %s", exc)
+
+        reply = self.complete(
+            prompt=prompt,
+            system=augmented_system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            model=model,
+        )
+
+        if save_response and memory_service is not None:
+            try:
+                memory_saved_id = memory_service.save(
+                    content=f"Q: {prompt}\nA: {reply}",
+                    tags=["conversation"],
+                )
+            except Exception as exc:
+                logger.warning("chat: memory save failed: %s", exc)
+
+        return {
+            "result": reply,
+            "memories_used": memories_used,
+            "memory_saved_id": memory_saved_id,
+        }

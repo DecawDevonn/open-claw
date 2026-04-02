@@ -14,6 +14,8 @@ from openclaw.services.leads import LeadsService
 from openclaw.services.comms import CommsService
 from openclaw.services.analytics import AnalyticsService
 from openclaw.services.monitoring import init_monitoring, health_payload
+from openclaw.services.sapphire import SapphireMemory
+from openclaw.framework.tools import register_save_to_memory
 from storage import get_storage
 
 # Configure logging
@@ -82,6 +84,16 @@ def create_app():
         sendgrid_from_email=settings.sendgrid_from_email,
     )
     _analytics = AnalyticsService(storage=_store)
+
+    # ── Sapphire Cognitive Memory ─────────────────────────────────────────────
+    _memory = SapphireMemory(
+        persist_dir=settings.chroma_persist_dir,
+        collection_name=settings.chroma_collection,
+        ai_service=_ai,
+        top_k=settings.sapphire_memory_top_k,
+        reflection_interval=settings.sapphire_reflection_interval,
+    )
+    register_save_to_memory(_memory)
 
     # Register AuthService on the app so require_auth can reach it
     app.extensions["auth_service"] = _auth
@@ -540,6 +552,115 @@ def create_app():
             return jsonify({'error': str(e)}), 503
         except Exception as e:
             logger.error(f"HuggingFace infer error: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/ai/chat', methods=['POST'])
+    @require_auth
+    def ai_chat():
+        """Sapphire Cognitive Wrapper — memory-augmented chat completion.
+
+        Retrieves relevant memories, injects them into the system prompt,
+        calls the LLM, and saves the response back to memory.
+        """
+        try:
+            data = request.json or {}
+            prompt = data.get('prompt', '')
+            if not prompt:
+                return jsonify({'error': 'prompt is required'}), 400
+            result = _ai.chat(
+                prompt=prompt,
+                system=data.get('system', 'You are DEVONN.AI, a helpful autonomous AI assistant.'),
+                max_tokens=int(data.get('max_tokens', 1024)),
+                temperature=float(data.get('temperature', 0.7)),
+                model=data.get('model'),
+                memory_service=_memory,
+                save_response=bool(data.get('save_response', True)),
+            )
+            return jsonify(result), 200
+        except RuntimeError as e:
+            return jsonify({'error': str(e)}), 503
+        except Exception as e:
+            logger.error(f"AI chat error: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    # ============================================
+    # Sapphire Memory Endpoints
+    # ============================================
+
+    @app.route('/api/memory/save', methods=['POST'])
+    @require_auth
+    def memory_save():
+        """Save a memory entry to the Sapphire vector store."""
+        try:
+            data = request.json or {}
+            content = data.get('content', '')
+            if not content:
+                return jsonify({'error': 'content is required'}), 400
+            mid = _memory.save(
+                content=content,
+                weight=float(data.get('weight', 1.0)),
+                tags=data.get('tags', []),
+                associations=data.get('associations', []),
+                memory_type=data.get('type', 'memory'),
+            )
+            return jsonify({'id': mid, 'status': 'saved'}), 201
+        except Exception as e:
+            logger.error(f"Memory save error: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/memory/search', methods=['POST'])
+    @require_auth
+    def memory_search():
+        """Semantic search over stored memories."""
+        try:
+            data = request.json or {}
+            query = data.get('query', '')
+            if not query:
+                return jsonify({'error': 'query is required'}), 400
+            results = _memory.search(query, n=int(data.get('n', settings.sapphire_memory_top_k)))
+            return jsonify({'results': results, 'count': len(results)}), 200
+        except Exception as e:
+            logger.error(f"Memory search error: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/memory/list', methods=['GET'])
+    @require_auth
+    def memory_list():
+        """Return the most-recent memories."""
+        try:
+            limit = int(request.args.get('limit', 50))
+            memories = _memory.list(limit=limit)
+            return jsonify({'memories': memories, 'count': len(memories), 'total': _memory.count()}), 200
+        except Exception as e:
+            logger.error(f"Memory list error: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/memory/reflect', methods=['POST'])
+    @require_auth
+    def memory_reflect():
+        """Trigger a Sapphire reflection — summarise recent memories."""
+        try:
+            data = request.json or {}
+            n = int(data.get('n', 5))
+            mid = _memory.reflect(n=n)
+            if mid is None:
+                return jsonify({'status': 'skipped', 'reason': 'insufficient memories or no AI service'}), 200
+            return jsonify({'status': 'reflected', 'memory_id': mid}), 201
+        except Exception as e:
+            logger.error(f"Memory reflect error: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/memory/<memory_id>', methods=['DELETE'])
+    @require_auth
+    def memory_delete(memory_id):
+        """Delete a memory entry by id."""
+        try:
+            deleted = _memory.delete(memory_id)
+            if not deleted:
+                return jsonify({'error': 'memory not found'}), 404
+            return jsonify({'status': 'deleted', 'id': memory_id}), 200
+        except Exception as e:
+            logger.error(f"Memory delete error: {e}")
             return jsonify({'error': str(e)}), 500
 
     # ============================================
