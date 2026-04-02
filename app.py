@@ -1045,6 +1045,96 @@ def create_app():
         return jsonify(list(reversed(entries))), 200
 
     # ============================================
+    # OpenClaw Agent Framework Endpoints
+    # ============================================
+
+    from openclaw.framework import AgentConfig, TaskExecutor
+
+    _executor = TaskExecutor(ai_service=_ai)
+
+    @app.route('/api/framework/agents/spawn', methods=['POST'])
+    @require_auth
+    def framework_spawn():
+        """Spawn a new framework agent.
+
+        Body (JSON):
+          name (str, required) — agent name
+          role (str) — executor | researcher | analyzer | validator
+          capabilities (list[str])
+          tools (list[str])
+          model (str)
+          max_steps (int)
+          temperature (float)
+          system_prompt (str)
+          metadata (dict)
+        """
+        data = request.json or {}
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'error': 'name is required'}), 400
+        config = AgentConfig.from_dict({**data, 'name': name})
+        agent = _executor.spawn(config)
+        return jsonify(agent.to_dict()), 201
+
+    @app.route('/api/framework/agents', methods=['GET'])
+    @require_auth
+    def framework_list_agents():
+        """Return all active framework agent instances."""
+        return jsonify(_executor.list_agents()), 200
+
+    @app.route('/api/framework/agents/<agent_id>', methods=['GET'])
+    @require_auth
+    def framework_get_agent(agent_id):
+        """Return a specific framework agent by id."""
+        agent = _executor.get_agent(agent_id)
+        if agent is None:
+            return jsonify({'error': 'Agent not found'}), 404
+        return jsonify(agent.to_dict()), 200
+
+    @app.route('/api/framework/run', methods=['POST'])
+    @require_auth
+    def framework_run():
+        """Execute a goal through the OpenClaw agent framework.
+
+        Body (JSON):
+          goal (str, required) — natural-language objective
+          strategy (str) — 'sequential' (default) or 'parallel'
+          agent (dict) — optional AgentConfig fields
+          context (dict) — extra context passed to the planner
+        """
+        data = request.json or {}
+        goal = (data.get('goal') or '').strip()
+        if not goal:
+            return jsonify({'error': 'goal is required'}), 400
+
+        strategy = data.get('strategy', 'sequential')
+        agent_data = data.get('agent') or {}
+        if agent_data and not agent_data.get('name'):
+            agent_data['name'] = 'openclaw-default'
+        agent_config = AgentConfig.from_dict(agent_data) if agent_data else None
+        context = data.get('context')
+
+        result = _executor.run(
+            goal=goal,
+            agent_config=agent_config,
+            strategy=strategy,
+            context=context,
+        )
+        status_code = 200 if result.status == 'done' else 500
+        return jsonify(result.to_dict()), status_code
+
+    @app.route('/api/framework/status', methods=['GET'])
+    @require_auth
+    def framework_status():
+        """Return the OpenClaw framework operational status."""
+        agents = _executor.list_agents()
+        return jsonify({
+            'status': 'operational',
+            'active_agents': len(agents),
+            'tools': _executor._registry.names(),
+        }), 200
+
+    # ============================================
     # Error Handlers
     # ============================================
 

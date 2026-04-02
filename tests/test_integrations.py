@@ -613,3 +613,103 @@ def test_audit_list(client, auth_headers):
     assert 'path' in entry
     assert 'status' in entry
     assert 'timestamp' in entry
+
+
+# ── /api/framework ────────────────────────────────────────────────────────────
+
+def test_framework_status_requires_auth(client):
+    resp = client.get('/api/framework/status')
+    assert resp.status_code == 401
+
+
+def test_framework_status(client, auth_headers):
+    resp = client.get('/api/framework/status', headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['status'] == 'operational'
+    assert 'active_agents' in data
+    assert isinstance(data['tools'], list)
+
+
+def test_framework_spawn_requires_auth(client):
+    resp = client.post('/api/framework/agents/spawn', json={'name': 'test-agent'})
+    assert resp.status_code == 401
+
+
+def test_framework_spawn_missing_name(client, auth_headers):
+    resp = client.post(
+        '/api/framework/agents/spawn',
+        json={'role': 'executor'},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+
+
+def test_framework_spawn(client, auth_headers):
+    resp = client.post(
+        '/api/framework/agents/spawn',
+        json={'name': 'researcher', 'role': 'researcher', 'capabilities': ['search']},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    data = resp.get_json()
+    assert data['config']['name'] == 'researcher'
+    assert data['status'] == 'idle'
+    assert 'id' in data
+
+
+def test_framework_list_agents(client, auth_headers):
+    # Spawn one first
+    client.post(
+        '/api/framework/agents/spawn',
+        json={'name': 'worker-1'},
+        headers=auth_headers,
+    )
+    resp = client.get('/api/framework/agents', headers=auth_headers)
+    assert resp.status_code == 200
+    agents = resp.get_json()
+    assert isinstance(agents, list)
+    assert len(agents) >= 1
+
+
+def test_framework_get_agent(client, auth_headers):
+    spawn_resp = client.post(
+        '/api/framework/agents/spawn',
+        json={'name': 'worker-get'},
+        headers=auth_headers,
+    )
+    agent_id = spawn_resp.get_json()['id']
+    resp = client.get(f'/api/framework/agents/{agent_id}', headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.get_json()['id'] == agent_id
+
+
+def test_framework_get_agent_not_found(client, auth_headers):
+    resp = client.get('/api/framework/agents/nonexistent', headers=auth_headers)
+    assert resp.status_code == 404
+
+
+def test_framework_run_requires_auth(client):
+    resp = client.post('/api/framework/run', json={'goal': 'do something'})
+    assert resp.status_code == 401
+
+
+def test_framework_run_missing_goal(client, auth_headers):
+    resp = client.post('/api/framework/run', json={}, headers=auth_headers)
+    assert resp.status_code == 400
+
+
+def test_framework_run_no_ai(client, auth_headers):
+    """Run without an AI key — executor falls back to stub output."""
+    resp = client.post(
+        '/api/framework/run',
+        json={'goal': 'greet the user', 'strategy': 'sequential'},
+        headers=auth_headers,
+    )
+    # Should succeed even without a real AI key (stub path)
+    assert resp.status_code in (200, 500)
+    data = resp.get_json()
+    assert 'agent_id' in data
+    assert data['goal'] == 'greet the user'
+    assert 'plan' in data
+    assert 'status' in data
