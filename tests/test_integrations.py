@@ -115,10 +115,11 @@ def test_auth_me_bad_token(client):
     assert resp.status_code == 401
 
 
-def test_auth_revoke_no_storage(client, auth_headers):
-    """Revoke without a storage backend returns 501 Not Implemented."""
+def test_auth_revoke_with_storage(client, auth_headers):
+    """Revoking a valid token with the storage-backed AuthService returns 200."""
     resp = client.post('/api/auth/revoke', headers=auth_headers)
-    assert resp.status_code == 501
+    assert resp.status_code == 200
+    assert resp.get_json()['message'] == 'Token revoked'
 
 
 # ── /api/ai/* ─────────────────────────────────────────────────────────────────

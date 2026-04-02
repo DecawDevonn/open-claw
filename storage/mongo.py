@@ -18,7 +18,7 @@ class MongoStorage(StorageBackend):
     _tasks: Collection
     _revoked_tokens: Collection
 
-    def __init__(self, uri: str, db_name: str = 'open-claw') -> None:
+    def __init__(self, uri: str, db_name: str = 'openclaw') -> None:
         self._client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000)
         db = self._client[db_name]
         self._users = db['users']

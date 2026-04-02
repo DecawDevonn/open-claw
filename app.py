@@ -11,6 +11,7 @@ from openclaw.services.voice import VoiceService
 from openclaw.services.search import SearchService
 from openclaw.services.integrations import IntegrationsService
 from openclaw.services.monitoring import init_monitoring, health_payload
+from storage import get_storage
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -27,10 +28,8 @@ def create_app():
     """Application factory pattern."""
     app = Flask(__name__)
 
-    # Per-app in-memory storage (each create_app() call gets a fresh store)
-    _agents: dict = {}
-    _tasks: dict = {}
-    _users: dict = {}
+    # Storage backend — MongoStorage when MONGO_URL is set, else InMemoryStorage
+    _store = get_storage(mongo_url=settings.mongo_url)
 
     # ── Initialise integrations ───────────────────────────────────────────────
     init_monitoring(settings.sentry_dsn)
@@ -48,6 +47,7 @@ def create_app():
         secret=settings.jwt_secret,
         algorithm=settings.jwt_algorithm,
         expiry_hours=settings.jwt_expiry_hours,
+        storage=_store,
     )
     _voice = VoiceService(
         elevenlabs_api_key=settings.elevenlabs_api_key,
@@ -94,7 +94,7 @@ def create_app():
                 'tasks_completed': 0
             }
 
-            _agents[agent_id] = agent
+            _store.save_agent(agent)
             logger.info(f"Created agent: {agent_id}")
             return jsonify(agent), 201
         except Exception as e:
@@ -104,12 +104,12 @@ def create_app():
     @app.route('/api/agents', methods=['GET'])
     def list_agents():
         """List all agents"""
-        return jsonify(list(_agents.values())), 200
+        return jsonify(_store.list_agents()), 200
 
     @app.route('/api/agents/<agent_id>', methods=['GET'])
     def get_agent(agent_id):
         """Get details of a specific agent"""
-        agent = _agents.get(agent_id)
+        agent = _store.get_agent(agent_id)
         if not agent:
             return jsonify({'error': 'Agent not found'}), 404
         return jsonify(agent), 200
@@ -118,17 +118,18 @@ def create_app():
     def update_agent(agent_id):
         """Update agent status or properties"""
         try:
-            if agent_id not in _agents:
+            agent = _store.get_agent(agent_id)
+            if not agent:
                 return jsonify({'error': 'Agent not found'}), 404
 
             data = request.json
-            agent = _agents[agent_id]
 
             if 'status' in data:
                 agent['status'] = data['status']
             if 'capabilities' in data:
                 agent['capabilities'] = data['capabilities']
 
+            _store.save_agent(agent)
             logger.info(f"Updated agent: {agent_id}")
             return jsonify(agent), 200
         except Exception as e:
@@ -138,10 +139,9 @@ def create_app():
     @app.route('/api/agents/<agent_id>', methods=['DELETE'])
     def delete_agent(agent_id):
         """Delete an agent"""
-        if agent_id not in _agents:
+        if not _store.delete_agent(agent_id):
             return jsonify({'error': 'Agent not found'}), 404
 
-        del _agents[agent_id]
         logger.info(f"Deleted agent: {agent_id}")
         return jsonify({'message': 'Agent deleted'}), 200
 
@@ -169,7 +169,7 @@ def create_app():
                 'result': None
             }
 
-            _tasks[task_id] = task
+            _store.save_task(task)
             logger.info(f"Created task: {task_id}")
             return jsonify(task), 201
         except Exception as e:
@@ -182,7 +182,7 @@ def create_app():
         status_filter = request.args.get('status')
         agent_filter = request.args.get('agent_id')
 
-        filtered_tasks = list(_tasks.values())
+        filtered_tasks = _store.list_tasks()
 
         if status_filter:
             filtered_tasks = [t for t in filtered_tasks if t['status'] == status_filter]
@@ -194,7 +194,7 @@ def create_app():
     @app.route('/api/tasks/<task_id>', methods=['GET'])
     def get_task(task_id):
         """Get details of a specific task"""
-        task = _tasks.get(task_id)
+        task = _store.get_task(task_id)
         if not task:
             return jsonify({'error': 'Task not found'}), 404
         return jsonify(task), 200
@@ -203,11 +203,11 @@ def create_app():
     def update_task(task_id):
         """Update task status or result"""
         try:
-            if task_id not in _tasks:
+            task = _store.get_task(task_id)
+            if not task:
                 return jsonify({'error': 'Task not found'}), 404
 
             data = request.json
-            task = _tasks[task_id]
 
             if 'status' in data:
                 task['status'] = data['status']
@@ -219,6 +219,7 @@ def create_app():
             if 'result' in data:
                 task['result'] = data['result']
 
+            _store.save_task(task)
             logger.info(f"Updated task: {task_id}")
             return jsonify(task), 200
         except Exception as e:
@@ -228,10 +229,9 @@ def create_app():
     @app.route('/api/tasks/<task_id>', methods=['DELETE'])
     def delete_task(task_id):
         """Delete a task"""
-        if task_id not in _tasks:
+        if not _store.delete_task(task_id):
             return jsonify({'error': 'Task not found'}), 404
 
-        del _tasks[task_id]
         logger.info(f"Deleted task: {task_id}")
         return jsonify({'message': 'Task deleted'}), 200
 
@@ -242,23 +242,25 @@ def create_app():
     @app.route('/api/status', methods=['GET'])
     def status():
         """Get system status"""
-        running_tasks = sum(1 for t in _tasks.values() if t['status'] == 'running')
-        completed_tasks = sum(1 for t in _tasks.values() if t['status'] == 'completed')
-        idle_agents = sum(1 for a in _agents.values() if a['status'] == 'idle')
+        all_tasks = _store.list_tasks()
+        all_agents = _store.list_agents()
+        running_tasks = sum(1 for t in all_tasks if t['status'] == 'running')
+        completed_tasks = sum(1 for t in all_tasks if t['status'] == 'completed')
+        idle_agents = sum(1 for a in all_agents if a['status'] == 'idle')
 
         return jsonify({
             'status': 'running',
             'timestamp': _now(),
             'agents': {
-                'total': len(_agents),
+                'total': len(all_agents),
                 'idle': idle_agents,
-                'active': len(_agents) - idle_agents
+                'active': len(all_agents) - idle_agents
             },
             'tasks': {
-                'total': len(_tasks),
+                'total': len(all_tasks),
                 'running': running_tasks,
                 'completed': completed_tasks,
-                'pending': len(_tasks) - running_tasks - completed_tasks
+                'pending': len(all_tasks) - running_tasks - completed_tasks
             }
         }), 200
 
@@ -282,18 +284,19 @@ def create_app():
             task_id = data.get('task_id')
             agent_id = data.get('agent_id')
 
-            if task_id not in _tasks:
+            task = _store.get_task(task_id)
+            if not task:
                 return jsonify({'error': 'Task not found'}), 404
-            if agent_id not in _agents:
+            agent = _store.get_agent(agent_id)
+            if not agent:
                 return jsonify({'error': 'Agent not found'}), 404
-
-            task = _tasks[task_id]
-            agent = _agents[agent_id]
 
             task['agent_id'] = agent_id
             task['status'] = 'assigned'
             agent['status'] = 'busy'
 
+            _store.save_task(task)
+            _store.save_agent(agent)
             logger.info(f"Assigned task {task_id} to agent {agent_id}")
             return jsonify({'task': task, 'agent': agent}), 200
         except Exception as e:
@@ -303,19 +306,21 @@ def create_app():
     @app.route('/api/workforce/summary', methods=['GET'])
     def workforce_summary():
         """Get workforce summary and statistics"""
+        all_agents = _store.list_agents()
+        all_tasks = _store.list_tasks()
         agent_capabilities = {}
-        for agent in _agents.values():
+        for agent in all_agents:
             for cap in agent.get('capabilities', []):
                 if cap not in agent_capabilities:
                     agent_capabilities[cap] = 0
                 agent_capabilities[cap] += 1
 
         return jsonify({
-            'agents_count': len(_agents),
-            'tasks_count': len(_tasks),
+            'agents_count': len(all_agents),
+            'tasks_count': len(all_tasks),
             'capabilities': agent_capabilities,
-            'agents': list(_agents.values()),
-            'tasks': list(_tasks.values())
+            'agents': all_agents,
+            'tasks': all_tasks
         }), 200
 
     # ============================================
@@ -330,11 +335,11 @@ def create_app():
             username = data.get('username', '').strip()
             if not username:
                 return jsonify({'error': 'username is required'}), 400
-            if any(u['username'] == username for u in _users.values()):
+            if _store.get_user_by_username(username):
                 return jsonify({'error': 'Username already exists'}), 409
             user_id = str(uuid.uuid4())
             user = {'id': user_id, 'username': username, 'created_at': _now()}
-            _users[user_id] = user
+            _store.save_user(user)
             token = _auth.issue_token(user_id, {'username': username})
             logger.info(f"Registered user: {user_id}")
             return jsonify({'token': token, 'user': user}), 201
@@ -348,7 +353,7 @@ def create_app():
         try:
             data = request.json or {}
             user_id = data.get('user_id', '').strip()
-            if user_id not in _users:
+            if not _store.get_user(user_id):
                 return jsonify({'error': 'User not found'}), 404
             token = _auth.issue_token(user_id)
             return jsonify({'token': token}), 200
