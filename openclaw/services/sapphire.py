@@ -138,7 +138,13 @@ class SapphireMemory:
                 return self._ai.embed(text)
             except Exception as exc:
                 logger.warning("SapphireMemory: embed failed (%s); using hash fallback.", exc)
-        # Deterministic 128-dim hash vector (for tests / no-API environments)
+        # Deterministic 128-dim hash vector used as fallback when no AI service is available
+        # (e.g. in tests or environments without an OpenAI key).
+        # NOTE: this dimensionality (128) differs from real OpenAI embeddings
+        # (1536 for text-embedding-3-small).  The fallback store (_FallbackStore)
+        # does not perform true nearest-neighbour search, so the mismatch is
+        # harmless — it is purely used for ID generation/ordering.  Do NOT
+        # mix hash-based and real embeddings in the same ChromaDB collection.
         digest = hashlib.sha256(text.encode()).digest()
         return [(b / 255.0) * 2 - 1 for b in digest[:128]]
 

@@ -575,13 +575,14 @@ def create_app():
                 model=data.get('model'),
                 memory_service=_memory,
                 save_response=bool(data.get('save_response', True)),
+                memory_format=data.get('memory_format'),
             )
             return jsonify(result), 200
         except RuntimeError as e:
             return jsonify({'error': str(e)}), 503
         except Exception as e:
             logger.error(f"AI chat error: {e}")
-            return jsonify({'error': str(e)}), 500
+            return jsonify({'error': 'An internal error occurred.'}), 500
 
     # ============================================
     # Sapphire Memory Endpoints
@@ -606,7 +607,7 @@ def create_app():
             return jsonify({'id': mid, 'status': 'saved'}), 201
         except Exception as e:
             logger.error(f"Memory save error: {e}")
-            return jsonify({'error': str(e)}), 500
+            return jsonify({'error': 'An internal error occurred.'}), 500
 
     @app.route('/api/memory/search', methods=['POST'])
     @require_auth
@@ -621,7 +622,7 @@ def create_app():
             return jsonify({'results': results, 'count': len(results)}), 200
         except Exception as e:
             logger.error(f"Memory search error: {e}")
-            return jsonify({'error': str(e)}), 500
+            return jsonify({'error': 'An internal error occurred.'}), 500
 
     @app.route('/api/memory/list', methods=['GET'])
     @require_auth
@@ -633,7 +634,7 @@ def create_app():
             return jsonify({'memories': memories, 'count': len(memories), 'total': _memory.count()}), 200
         except Exception as e:
             logger.error(f"Memory list error: {e}")
-            return jsonify({'error': str(e)}), 500
+            return jsonify({'error': 'An internal error occurred.'}), 500
 
     @app.route('/api/memory/reflect', methods=['POST'])
     @require_auth
@@ -648,7 +649,7 @@ def create_app():
             return jsonify({'status': 'reflected', 'memory_id': mid}), 201
         except Exception as e:
             logger.error(f"Memory reflect error: {e}")
-            return jsonify({'error': str(e)}), 500
+            return jsonify({'error': 'An internal error occurred.'}), 500
 
     @app.route('/api/memory/<memory_id>', methods=['DELETE'])
     @require_auth
@@ -661,7 +662,7 @@ def create_app():
             return jsonify({'status': 'deleted', 'id': memory_id}), 200
         except Exception as e:
             logger.error(f"Memory delete error: {e}")
-            return jsonify({'error': str(e)}), 500
+            return jsonify({'error': 'An internal error occurred.'}), 500
 
     # ============================================
     # Voice Endpoints

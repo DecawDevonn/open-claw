@@ -222,6 +222,7 @@ class AIService:
         model: Optional[str] = None,
         memory_service: Optional[Any] = None,
         save_response: bool = True,
+        memory_format: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Cognitive Wrapper around :meth:`complete` that integrates Sapphire memory.
 
@@ -254,6 +255,10 @@ class AIService:
         save_response:
             When True (default) the assistant's reply is saved back to memory
             after a successful completion.
+        memory_format:
+            Python format string used when saving the conversation to memory.
+            Receives ``{prompt}`` and ``{reply}`` as named arguments.
+            Defaults to ``"Q: {prompt}\\nA: {reply}"``.
 
         Returns
         -------
@@ -285,8 +290,10 @@ class AIService:
 
         if save_response and memory_service is not None:
             try:
+                fmt = memory_format or "Q: {prompt}\nA: {reply}"
+                content = fmt.format(prompt=prompt, reply=reply)
                 memory_saved_id = memory_service.save(
-                    content=f"Q: {prompt}\nA: {reply}",
+                    content=content,
                     tags=["conversation"],
                 )
             except Exception as exc:

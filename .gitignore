@@ -12,3 +12,6 @@ __pycache__/
 .vscode/
 .idea/
 *.sublime-*
+
+# Sapphire / ChromaDB local memory store
+chroma_memory/
