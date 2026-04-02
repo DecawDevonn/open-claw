@@ -31,11 +31,18 @@ integration layer for AI/NLP, voice, semantic search, authentication, and third-
 │  │                 /api/auth/revoke                   │     │
 │  │                                                    │     │
 │  │  AI / NLP:      /api/ai/complete                   │     │
+│  │                 /api/ai/chat  (Sapphire Wrapper)   │     │
 │  │                 /api/ai/embed                      │     │
 │  │                 /api/ai/image                      │     │
 │  │                 /api/ai/transcribe                 │     │
 │  │                 /api/ai/translate                  │     │
 │  │                 /api/ai/hf                         │     │
+│  │                                                    │     │
+│  │  Memory:        /api/memory/save                   │     │
+│  │                 /api/memory/search                 │     │
+│  │                 /api/memory/list                   │     │
+│  │                 /api/memory/reflect                │     │
+│  │                 /api/memory/<id>  DELETE           │     │
 │  │                                                    │     │
 │  │  Voice:         /api/voice/tts                     │     │
 │  │                 /api/voice/stt                     │     │
@@ -114,12 +121,13 @@ warnings when placeholder values are detected.
 
 | Module | Provider(s) | Key capabilities |
 |---|---|---|
-| `ai.py` | OpenAI, HuggingFace, StabilityAI, DeepL | Complete, Embed, DALL·E, Whisper, HF inference, Translate |
+| `ai.py` | OpenAI, HuggingFace, StabilityAI, DeepL | Complete, Embed, DALL·E, Whisper, HF inference, Translate, **chat() Cognitive Wrapper** |
 | `auth.py` | PyJWT | Issue / verify / revoke JWTs; `require_auth` decorator |
 | `voice.py` | ElevenLabs, AssemblyAI | TTS, STT (URL or bytes), speaker labels |
 | `search.py` | Pinecone, SerpAPI, Algolia | Vector upsert/query/delete, web search, keyword search |
 | `integrations.py` | Webhooks, Airtable, Google Sheets | HMAC-signed relay, list/create records, append rows |
 | `monitoring.py` | Sentry | SDK init, structured health payload |
+| `sapphire.py` | ChromaDB | Persistent vector memory — save, search, inject, reflect, delete |
 
 Every service method raises `RuntimeError` when its required API key is missing,
 which the route handlers catch and return as `503 Service Unavailable`.
@@ -132,10 +140,16 @@ which the route handlers catch and return as `503 Service Unavailable`.
 | Tasks | `POST/GET /api/tasks`, `GET/PUT/DELETE /api/tasks/<id>` |
 | Workforce | `POST /api/workforce/assign`, `GET /api/workforce/summary` |
 | Auth | `POST /api/auth/register`, `POST /api/auth/token`, `GET /api/auth/me`, `POST /api/auth/revoke` |
-| AI | `POST /api/ai/complete`, `POST /api/ai/embed`, `POST /api/ai/image`, `POST /api/ai/transcribe`, `POST /api/ai/translate`, `POST /api/ai/hf` |
+| AI | `POST /api/ai/complete`, `POST /api/ai/chat`, `POST /api/ai/embed`, `POST /api/ai/image`, `POST /api/ai/transcribe`, `POST /api/ai/translate`, `POST /api/ai/hf` |
+| Memory | `POST /api/memory/save`, `POST /api/memory/search`, `GET /api/memory/list`, `POST /api/memory/reflect`, `DELETE /api/memory/<id>` |
 | Voice | `POST /api/voice/tts`, `POST /api/voice/stt`, `GET /api/voice/voices` |
 | Search | `POST /api/search/vector/upsert`, `POST /api/search/vector/query`, `GET /api/search/web`, `POST /api/search/algolia` |
 | Integrations | `POST /api/integrations/webhook`, `POST /api/integrations/webhook/verify`, `GET/POST /api/integrations/airtable/<table>`, `POST /api/integrations/sheets/append`, `GET /api/integrations/services` |
+| Leads | `POST/GET /api/leads`, `GET/PUT/DELETE /api/leads/<id>`, score, route, follow-up |
+| Comms | `POST /api/comms/sms`, `/whatsapp`, `/call`, `/email` |
+| Analytics | `POST/GET /api/analytics/events`, `GET /api/analytics/metrics`, `POST/GET /api/analytics/feedback` |
+| Audit | `GET /api/audit` |
+| Framework | `POST /api/framework/agents/spawn`, `GET /api/framework/agents`, `POST /api/framework/run`, `GET /api/framework/status` |
 | System | `GET /api/health`, `GET /api/status` |
 
 ### Storage Layer (`storage/`)
@@ -170,24 +184,43 @@ open-claw/
 ├── app.py                      # Flask application factory + all routes
 ├── openclaw/
 │   ├── __init__.py
-│   ├── config.py               # Settings dataclass (all ~50 env vars)
+│   ├── config.py               # Settings dataclass (all ~55 env vars)
+│   ├── framework/
+│   │   ├── agent.py            # AgentConfig + Agent dataclasses
+│   │   ├── executor.py         # TaskExecutor — runs plans step by step
+│   │   ├── memory.py           # AgentMemory — short/long-term in-process store
+│   │   ├── planner.py          # MetaPlanner — decomposes goals into TaskPlans
+│   │   └── tools.py            # ToolRegistry + save_to_memory tool
 │   └── services/
 │       ├── __init__.py
-│       ├── ai.py               # OpenAI, HuggingFace, StabilityAI, DeepL
+│       ├── ai.py               # OpenAI, HuggingFace, StabilityAI, DeepL + chat()
 │       ├── auth.py             # JWT issue/verify/revoke + require_auth
 │       ├── voice.py            # ElevenLabs TTS, AssemblyAI STT
 │       ├── search.py           # Pinecone, SerpAPI, Algolia
 │       ├── integrations.py     # Webhook relay, Airtable, Google Sheets
-│       └── monitoring.py       # Sentry init, health payload
+│       ├── monitoring.py       # Sentry init, health payload
+│       ├── sapphire.py         # ChromaDB vector memory (Sapphire Protocol)
+│       ├── leads.py            # Lead management + AI scoring
+│       ├── comms.py            # Twilio SMS/WhatsApp/Call, SendGrid email
+│       └── analytics.py        # Event tracking, metrics, feedback
 ├── storage/
 │   ├── base.py                 # StorageBackend ABC
 │   └── mongo.py                # MongoDB backend
+├── agents/devonn/
+│   ├── identity.md             # DEVONN.AI identity profile
+│   ├── soul.md                 # Core directives and decision framework
+│   ├── agent.md                # Agent execution layer spec
+│   ├── task_list.md            # Active task pipeline
+│   └── memory.md               # Sapphire memory structure and protocol
+├── memory/
+│   └── USER.md                 # Operator profile (Wesley Little)
 ├── tests/
 │   ├── test_api.py             # Core agent/task/workforce/status tests
-│   └── test_integrations.py    # Auth/AI/voice/search/integration tests
+│   ├── test_integrations.py    # Auth/AI/voice/search/integration tests
+│   └── test_sapphire.py        # Sapphire memory + Cognitive Wrapper tests
 ├── docs/                       # Documentation
 ├── scripts/                    # Utility shell scripts + systemd unit
-├── .env.example                # Full credentials template (all ~50 vars)
+├── .env.example                # Full credentials template (~55 vars)
 ├── .github/workflows/          # CI/CD pipelines
 ├── Dockerfile
 ├── docker-compose.yml

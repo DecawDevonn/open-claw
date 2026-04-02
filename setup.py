@@ -29,5 +29,8 @@ setup(
     extras_require={
         'dev': ['pytest>=7.0', 'pytest-cov>=4.0', 'flake8>=6.0'],
         'mongo': ['pymongo>=4.0'],
+        'monitoring': ['sentry-sdk[flask]>=2.6.0'],
+        'memory': ['chromadb>=1.0.0'],
+        'all': ['pymongo>=4.0', 'sentry-sdk[flask]>=2.6.0', 'chromadb>=1.0.0'],
     },
 )
