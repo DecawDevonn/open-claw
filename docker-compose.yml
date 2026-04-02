@@ -1,1 +1,38 @@
-version: '3.8'\n\nservices:\n  web:\n    build: .\n    ports:\n      - '5000:5000'\n    environment:\n      - FLASK_ENV=development\n      - DATABASE_URL=postgresql://postgres:postgres@db/postgres\n    depends_on:\n      - db\n      - redis\n\n  db:\n    image: postgres:latest\n    environment:\n      POSTGRES_USER: postgres\n      POSTGRES_PASSWORD: postgres\n      POSTGRES_DB: postgres\n    volumes:\n      - postgres_data:/var/lib/postgresql/data\n\n  redis:\n    image: redis:latest\n\nvolumes:\n  postgres_data:
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - FLASK_ENV=production
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - MONGO_URI=${MONGO_URI:-mongodb://mongo:27017/openclaw}
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:6
+    environment:
+      MONGO_INITDB_DATABASE: openclaw
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  mongo_data:

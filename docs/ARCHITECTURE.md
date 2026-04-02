@@ -1,56 +1,124 @@
-# System Architecture and Component Design
+# System Architecture
 
 ## Overview
-This document provides an overview of the system architecture and the design of its components for the Open Claw project.
 
-## System Architecture
-The Open Claw project is structured around a modular architecture that emphasizes separation of concerns, scalability, and maintainability. The main components of the architecture include:
+OpenClaw is a Python/Flask REST API for managing AI agent workforces. It follows a simple layered architecture optimized for clarity and extensibility.
 
-1. **Frontend**: The user interface that interacts with the backend services. It is built using React and communicates with the backend via REST APIs.
+```
+┌─────────────────────────────────────────────┐
+│               HTTP Clients                   │
+│        (curl, SDK, web dashboard)            │
+└─────────────────────┬───────────────────────┘
+                      │ HTTPS
+┌─────────────────────▼───────────────────────┐
+│           nginx / Load Balancer              │
+│         (TLS termination, routing)           │
+└─────────────────────┬───────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────┐
+│         Flask Application (Gunicorn)         │
+│  ┌──────────────────────────────────────┐   │
+│  │           create_app()               │   │
+│  │  /api/agents   /api/tasks            │   │
+│  │  /api/health   /api/status           │   │
+│  │  /api/workforce/*                    │   │
+│  └──────────────────────────────────────┘   │
+└─────────────────────┬───────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────┐
+│            Storage Layer                     │
+│  ┌─────────────────┐  ┌──────────────────┐  │
+│  │  In-Memory Dict │  │  MongoStorage    │  │
+│  │  (development)  │  │  (production)    │  │
+│  └─────────────────┘  └──────────────────┘  │
+└─────────────────────┬───────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────┐
+│              MongoDB 6                       │
+│   Collections: agents, tasks, users,         │
+│                revoked_tokens                │
+└─────────────────────────────────────────────┘
+```
 
-2. **Backend Services**: The APIs that handle the business logic and serve data to the frontend. It is designed using Node.js and Express, and it communicates with the database.
+---
 
-3. **Database**: A persistent data layer that stores user data, configurations, and other essential information. The project uses MongoDB.
+## Components
 
-4. **Authentication Service**: A dedicated service that handles user authentication and authorization, ensuring secure access to the system.
+### Flask Application (`app.py`)
 
-5. **Message Queue**: A message broker (like RabbitMQ) that facilitates communication between different backend services to decouple them and enhance scalability.
+Uses the **application factory pattern** (`create_app()`), which:
 
-6. **Deployment**: The entire system is containerized using Docker, allowing for seamless deployment and scaling in various environments (development, staging, production).
+- Enables clean test isolation (each test gets a fresh app instance)
+- Avoids circular imports
+- Supports multiple configurations (testing, production)
 
-## Component Design
-### 1. Frontend
-- **Technologies Used**: React, Redux, Axios
-- **Main Components**:
-  - Header: Navigation and user information display
-  - Dashboard: Main user interface for interaction
-  - Settings: Configuration options for users
+### API Endpoints
 
-### 2. Backend Services
-- **Technologies Used**: Node.js, Express, mongoose
-- **Endpoints**:
-  - User Management: Create, read, update, delete user information
-  - Data Management: Handle project and resource data
+| Group | Endpoints |
+|---|---|
+| Agents | `POST/GET /api/agents`, `GET/PUT/DELETE /api/agents/<id>` |
+| Tasks | `POST/GET /api/tasks`, `GET/PUT/DELETE /api/tasks/<id>` |
+| Workforce | `POST /api/workforce/assign`, `GET /api/workforce/summary` |
+| System | `GET /api/health`, `GET /api/status` |
 
-### 3. Database
-- **Structure**:
-  - Users: Holds user credentials and profiles
-  - Projects: Stores project metadata and user assignments
+### Storage Layer (`storage/`)
 
-### 4. Authentication Service
-- **Flow**:
-  - Sign Up: New users can register
-  - Login: Users authenticate and receive a JWT token
+- **In-memory** (`_agents`, `_tasks` dicts in `app.py`): Used by default; fast, zero-dependency, reset on restart.
+- **MongoStorage** (`storage/mongo.py`): Drop-in persistent backend backed by MongoDB. Implements the same interface so the application layer is storage-agnostic.
 
-### 5. Message Queue
-- **Purpose**: To handle asynchronous tasks like notifications and data processing
-- **Components**:
-  - Producers: Services that send messages
-  - Consumers: Services that listen and process messages
+### Data Flow
 
-### 6. Deployment
-- **Method**: Kubernetes for orchestration and Docker for containerization
-- **CI/CD**: Integration with GitHub Actions for automated testing and deployment.
+```
+Client → nginx → Gunicorn (workers) → Flask route handler
+                                           │
+                                     Validate input
+                                           │
+                                   Read/write storage
+                                           │
+                                    Return JSON response
+```
 
-## Conclusion
-This document outlines the fundamental architecture and components of the Open Claw project, serving as a guide for future development and collaboration.
+---
+
+## Security Model
+
+- **Non-root container**: The Docker image runs as user `openclaw` (no shell)
+- **TLS**: Enforced at the nginx layer; the app itself speaks plain HTTP internally
+- **Secrets**: Passed via environment variables, never hardcoded
+- **Error messages**: Generic messages returned to clients; details logged server-side only
+- **Health check**: `/api/health` is unauthenticated and returns minimal info
+
+---
+
+## Scalability
+
+OpenClaw scales horizontally:
+
+1. Run multiple Gunicorn instances behind a load balancer
+2. All instances share a single MongoDB cluster (replica set recommended)
+3. MongoDB handles concurrent writes with document-level locking
+
+For extreme scale, the in-memory storage can be swapped for Redis with minimal code changes.
+
+---
+
+## Directory Structure
+
+```
+open-claw/
+├── app.py                  # Flask application factory
+├── openclaw/               # Python package metadata
+│   └── __init__.py
+├── storage/                # Storage backends
+│   ├── base.py             # Abstract base class
+│   └── mongo.py            # MongoDB backend
+├── tests/                  # Test suite
+│   └── test_api.py
+├── docs/                   # Documentation
+├── scripts/                # Utility shell scripts
+├── .github/workflows/      # CI/CD pipelines
+├── Dockerfile              # Multi-stage container build
+├── docker-compose.yml      # Local/production compose stack
+├── requirements.txt        # Python dependencies
+└── pyproject.toml          # Build configuration
+```
