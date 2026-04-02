@@ -85,6 +85,7 @@ pytest tests/ -v
 - [Architecture](docs/ARCHITECTURE.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [All Install Methods](docs/INSTALL_METHODS.md)
+- [Update Monitor](docs/UPDATE_MONITOR.md)
 
 ---
 
