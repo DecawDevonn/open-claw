@@ -25,6 +25,10 @@ requires-python = ">=3.10"
 dependencies = [
     "flask>=3.0",
     "gunicorn>=21.0",
+    "python-dotenv>=1.0.1",
+    "PyJWT>=2.12.0",
+    "cryptography>=46.0.5",
+    "requests>=2.32.3",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +39,13 @@ dev = [
 ]
 mongo = [
     "pymongo>=4.0",
+]
+monitoring = [
+    "sentry-sdk[flask]>=2.6.0",
+]
+all = [
+    "pymongo>=4.0",
+    "sentry-sdk[flask]>=2.6.0",
 ]
 
 [project.urls]
