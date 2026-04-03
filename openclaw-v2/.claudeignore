@@ -1,0 +1,17 @@
+# Heavy AI + vision data
+data/
+models/
+*.pt
+*.onnx
+
+# Build + deps
+node_modules/
+dist/
+build/
+
+# Logs
+*.log
+
+# System
+.venv/
+.git/
