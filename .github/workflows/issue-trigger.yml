@@ -1,0 +1,63 @@
+name: Issue → AI Fix Trigger
+
+on:
+  issues:
+    types: [opened, labeled]
+
+jobs:
+  trigger-fix:
+    runs-on: ubuntu-latest
+    # Only trigger for bug reports or issues labeled 'auto-fix'
+    if: |
+      contains(github.event.issue.labels.*.name, 'auto-fix') ||
+      contains(github.event.issue.labels.*.name, 'bug') ||
+      contains(toJson(github.event.issue.title), '[auto]')
+
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN_WRITE }}
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install openai flake8
+
+      - name: Configure git identity
+        run: |
+          git config user.email "devonn-ai@users.noreply.github.com"
+          git config user.name "Devonn AI Agent"
+          git remote set-url origin https://x-access-token:${{ secrets.GH_TOKEN_WRITE }}@github.com/${{ github.repository }}
+
+      - name: Comment on issue — AI is working
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN_WRITE }}
+        run: |
+          gh issue comment ${{ github.event.issue.number }} \
+            --body "🤖 **Devonn AI Agent** is analyzing this issue and will attempt an automated fix. A PR will be opened if a patch can be generated." \
+            --repo ${{ github.repository }}
+
+      - name: Run AI Fix Engine with issue context
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN_WRITE }}
+          SECRET_KEY: test-secret-key-for-ci-32-chars!!
+          JWT_SECRET_KEY: test-jwt-secret-key-for-ci-32chars
+          FLASK_TESTING: "true"
+          RATELIMIT_ENABLED: "false"
+        run: |
+          python scripts/ai/propose_fixes.py \
+            --issue-body "${{ github.event.issue.title }}: ${{ github.event.issue.body }}"
