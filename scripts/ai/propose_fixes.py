@@ -1,395 +1,244 @@
-#!/usr/bin/env python3
 """
-AI-assisted static analysis and fix proposal script.
+Devonn Autonomous Fix Engine
+============================
+Detects CI failures, generates LLM-powered patches, opens PRs automatically.
 
-This script:
-1. Runs static checks (mypy, flake8/ruff/black, pytest) on the repository.
-2. Identifies low-risk, safe-to-fix issues (e.g. mypy var-annotated warnings).
-3. Queries the OpenAI API with the relevant code context to generate a unified diff.
-4. Applies the patch locally and reruns checks to confirm the fix is safe.
-5. If checks pass, commits the fix to a branch named ai/proposed-fixes/<timestamp>
-   and opens a draft pull request via the GitHub API.
-6. Appends a summary entry to scripts/ai/run_log.json.
+Trigger conditions:
+  - pytest failures
+  - flake8 lint errors
+  - New GitHub issues (via issue-trigger workflow)
+  - Scheduled 30-minute sweep
+
+Usage:
+  python scripts/ai/propose_fixes.py [--issue-body "..."] [--dry-run]
 """
 
-import json
-import logging
-import os
-import re
 import subprocess
+import json
+import os
 import sys
-import tempfile
+import argparse
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-RUN_LOG_PATH = Path(__file__).resolve().parent / "run_log.json"
-BRANCH_PREFIX = "ai/proposed-fixes"
-
-# Low-risk mypy error codes that are safe to auto-fix.
-LOW_RISK_MYPY_CODES = {"var-annotated"}
-
-# ---------------------------------------------------------------------------
-# Helper: run a subprocess and capture output
-# ---------------------------------------------------------------------------
+# ── Configuration ─────────────────────────────────────────────────────────────
+REPO = os.environ.get("GITHUB_REPOSITORY", "DecawDevonn/open-claw")
+BASE_BRANCH = "main"
+OUTPUT_BRANCH = f"auto/fix-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+GH_TOKEN = os.environ.get("GH_TOKEN", os.environ.get("GH_TOKEN_WRITE", ""))
+MAX_PATCH_CHARS = 8000  # guard against runaway LLM output
 
 
-def _run(cmd: list[str], cwd: Optional[Path] = None) -> tuple[int, str, str]:
-    """Run *cmd* in *cwd* and return (returncode, stdout, stderr)."""
-    result = subprocess.run(
-        cmd,
-        cwd=str(cwd or REPO_ROOT),
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode, result.stdout, result.stderr
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def run(cmd: list[str], check: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, check=check)
 
 
-# ---------------------------------------------------------------------------
-# Step 1 – Run static checks and collect findings
-# ---------------------------------------------------------------------------
-
-LOW_RISK_PATTERN = re.compile(
-    r"^(?P<file>[^:]+):(?P<line>\d+)(?::\d+)?: error: .+  \[(?P<code>[^\]]+)\]$"
-)
+def run_tests() -> tuple[int, str]:
+    """Run pytest and return (exit_code, combined_output)."""
+    result = run(["python", "-m", "pytest", "--maxfail=5",
+                  "--disable-warnings", "-q", "--tb=short"])
+    return result.returncode, (result.stdout + result.stderr)[:6000]
 
 
-def run_mypy() -> list[dict]:
-    """Run mypy and return a list of low-risk finding dicts."""
-    rc, stdout, stderr = _run(
-        [sys.executable, "-m", "mypy", "--ignore-missing-imports", "."],
-    )
-    findings: list[dict] = []
-    for line in stdout.splitlines():
-        m = LOW_RISK_PATTERN.match(line)
-        if m and m.group("code") in LOW_RISK_MYPY_CODES:
-            findings.append(
-                {
-                    "tool": "mypy",
-                    "file": m.group("file"),
-                    "line": int(m.group("line")),
-                    "code": m.group("code"),
-                    "message": line,
-                }
-            )
-    log.info("mypy returned %d low-risk finding(s).", len(findings))
-    return findings
+def run_lint() -> tuple[int, str]:
+    """Run flake8 and return (exit_code, output)."""
+    result = run(["python", "-m", "flake8", ".", "--max-line-length=120",
+                  "--exclude=.git,__pycache__,venv,.venv,node_modules"])
+    return result.returncode, result.stdout[:3000]
 
 
-def run_flake8() -> list[dict]:
-    """Run flake8 (if available) and return findings for safe codes."""
-    rc, stdout, _ = _run([sys.executable, "-m", "flake8", "--max-line-length=120", "."])
-    if rc == 5:  # flake8 not found / no files checked
-        return []
-    findings: list[dict] = []
-    # Only target missing whitespace around operators (E225) — low risk
-    safe_codes = {"E225", "W291", "W293", "W292"}
-    pattern = re.compile(r"^(?P<file>[^:]+):(?P<line>\d+):\d+: (?P<code>[A-Z]\d+) ")
-    for line in stdout.splitlines():
-        m = pattern.match(line)
-        if m and m.group("code") in safe_codes:
-            findings.append(
-                {
-                    "tool": "flake8",
-                    "file": m.group("file"),
-                    "line": int(m.group("line")),
-                    "code": m.group("code"),
-                    "message": line,
-                }
-            )
-    log.info("flake8 returned %d low-risk finding(s).", len(findings))
-    return findings
+def collect_source_context() -> str:
+    """Collect key source files for the LLM to reason about."""
+    context_parts = []
+    key_files = ["app.py", "storage/base.py", "storage/memory.py",
+                 "storage/mongo.py", "tests/test_api.py"]
+    for path in key_files:
+        p = Path(path)
+        if p.exists():
+            content = p.read_text()[:2000]
+            context_parts.append(f"### {path}\n```python\n{content}\n```")
+    return "\n\n".join(context_parts)
 
 
-def run_pytest() -> tuple[bool, str]:
-    """Run pytest and return (passed, summary_line)."""
-    rc, stdout, stderr = _run([sys.executable, "-m", "pytest", "tests/", "-q", "--tb=no"])
-    passed = rc == 0
-    # Extract summary line (last non-empty line)
-    lines = [l for l in stdout.splitlines() if l.strip()]
-    summary = lines[-1] if lines else "(no output)"
-    log.info("pytest %s – %s", "PASSED" if passed else "FAILED", summary)
-    return passed, summary
-
-
-# ---------------------------------------------------------------------------
-# Step 2 – Query OpenAI for a unified diff fix
-# ---------------------------------------------------------------------------
-
-
-def _read_file_around(filepath: str, line: int, context: int = 10) -> str:
-    """Return lines around *line* in *filepath* with line numbers."""
-    path = REPO_ROOT / filepath
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+def generate_fix_with_llm(failure_logs: str, issue_body: str = "") -> str:
+    """Call OpenAI to generate a unified diff patch for the failures."""
+    if not OPENAI_API_KEY:
+        print("⚠️  OPENAI_API_KEY not set — skipping LLM fix generation")
         return ""
-    start = max(0, line - context - 1)
-    end = min(len(lines), line + context)
-    numbered = [f"{i + 1}: {lines[i]}" for i in range(start, end)]
-    return "\n".join(numbered)
-
-
-def query_openai_for_fix(finding: dict) -> Optional[str]:
-    """
-    Ask OpenAI to produce a minimal unified diff that fixes *finding*.
-    Returns the diff string, or None if the API call fails or no key is set.
-    """
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        log.warning("OPENAI_API_KEY not set – skipping OpenAI query.")
-        return None
 
     try:
-        from openai import OpenAI  # type: ignore[import]
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
     except ImportError:
-        log.warning("openai package not installed – skipping OpenAI query.")
-        return None
+        print("⚠️  openai package not installed — skipping LLM fix generation")
+        return ""
 
-    snippet = _read_file_around(finding["file"], finding["line"])
-    prompt = (
-        "You are a Python static-analysis assistant. "
-        "Produce ONLY a minimal unified diff (no explanations) that fixes the "
-        f"following {finding['tool']} issue:\n\n"
-        f"Issue: {finding['message']}\n\n"
-        f"File: {finding['file']} (relevant lines shown below)\n"
-        f"```\n{snippet}\n```\n\n"
-        "Rules:\n"
-        "- The fix must be safe and low-risk (e.g. adding a type annotation).\n"
-        "- Do NOT refactor logic.\n"
-        "- Output ONLY the unified diff starting with '--- a/' and '+++ b/'."
-    )
+    source_ctx = collect_source_context()
+    issue_section = f"\n\n### GitHub Issue\n{issue_body}" if issue_body else ""
 
-    client = OpenAI(api_key=api_key)
+    prompt = textwrap.dedent(f"""
+        You are an expert Python engineer working on the `open-claw` Flask API project.
+        Your job is to produce a minimal, correct unified diff patch that fixes the failures below.
+
+        ## Failure Logs
+        ```
+        {failure_logs[:3000]}
+        ```
+        {issue_section}
+
+        ## Source Context
+        {source_ctx[:4000]}
+
+        ## Instructions
+        - Output ONLY a valid unified diff (git diff format) — no prose, no markdown fences.
+        - Keep changes minimal and surgical.
+        - Do not change test files unless the test itself is wrong.
+        - If no fix is possible, output exactly: NO_FIX
+    """).strip()
+
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=512,
+            max_tokens=1500,
+            temperature=0.1,
         )
-        diff = response.choices[0].message.content or ""
-        return diff.strip() if diff.strip().startswith("---") else None
-    except Exception as exc:
-        import openai as _openai
-
-        if isinstance(exc, (_openai.OpenAIError, _openai.APIConnectionError)):
-            log.error("OpenAI API error: %s", exc)
-        else:
-            log.error("Unexpected error while querying OpenAI: %s", exc)
-            raise
-        return None
+        patch = response.choices[0].message.content.strip()
+        return patch[:MAX_PATCH_CHARS]
+    except Exception as e:
+        print(f"⚠️  LLM call failed: {e}")
+        return ""
 
 
-# ---------------------------------------------------------------------------
-# Step 3 – Apply patch and verify
-# ---------------------------------------------------------------------------
+def apply_patch(patch: str) -> bool:
+    """Apply a unified diff patch. Returns True on success."""
+    if not patch or patch == "NO_FIX":
+        return False
+    patch_file = Path("auto_fix.patch")
+    patch_file.write_text(patch)
+    result = run(["git", "apply", "--check", "auto_fix.patch"])
+    if result.returncode != 0:
+        print(f"⚠️  Patch does not apply cleanly:\n{result.stderr[:500]}")
+        patch_file.unlink(missing_ok=True)
+        return False
+    run(["git", "apply", "auto_fix.patch"], check=True)
+    patch_file.unlink(missing_ok=True)
+    return True
 
 
-def apply_and_verify(diff: str) -> bool:
-    """
-    Write *diff* to a temp file, apply it with `patch`, then rerun checks.
-    Returns True only if the patch applies cleanly AND pytest still passes.
-    """
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".patch", delete=False) as f:
-        f.write(diff)
-        patch_file = f.name
-
-    try:
-        rc, stdout, stderr = _run(
-            ["patch", "-p1", "--dry-run", "-i", patch_file],
-        )
-        if rc != 0:
-            log.warning("Patch dry-run failed:\n%s", stderr)
-            return False
-
-        rc, stdout, stderr = _run(["patch", "-p1", "-i", patch_file])
-        if rc != 0:
-            log.warning("Patch apply failed:\n%s", stderr)
-            return False
-
-        passed, _ = run_pytest()
-        return passed
-    finally:
-        Path(patch_file).unlink(missing_ok=True)
+def create_branch() -> None:
+    run(["git", "checkout", "-b", OUTPUT_BRANCH], check=True)
 
 
-# ---------------------------------------------------------------------------
-# Step 4 – Commit to a branch and open a draft PR
-# ---------------------------------------------------------------------------
+def commit_and_push(message: str) -> None:
+    run(["git", "config", "user.email", "devonn-ai@users.noreply.github.com"])
+    run(["git", "config", "user.name", "Devonn AI Agent"])
+    run(["git", "add", "."], check=True)
+    run(["git", "commit", "-m", message], check=True)
+    run(["git", "push", "origin", OUTPUT_BRANCH], check=True)
 
 
-def commit_and_open_pr(finding: dict, diff: str) -> Optional[str]:
-    """
-    Commit the current working-tree changes to a new branch and open a draft PR.
-    Returns the PR URL on success, or None on failure.
-    """
-    github_token = os.environ.get("GITHUB_TOKEN", "")
-    repo_name = os.environ.get("GITHUB_REPOSITORY", "")
-    if not github_token or not repo_name:
-        log.warning("GITHUB_TOKEN / GITHUB_REPOSITORY not set – skipping PR creation.")
-        return None
-
-    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
-    branch = f"{BRANCH_PREFIX}/{timestamp}"
-
-    # Configure git
-    _run(["git", "config", "user.email", "ai-bot@users.noreply.github.com"])
-    _run(["git", "config", "user.name", "AI Fix Bot"])
-
-    # Create branch, stage and commit
-    rc, _, err = _run(["git", "checkout", "-b", branch])
-    if rc != 0:
-        log.error("Failed to create branch %s: %s", branch, err)
-        return None
-
-    _run(["git", "add", "-A"])
-    commit_msg = (
-        f"fix({finding['tool']}): auto-fix {finding['code']} in {finding['file']} "
-        f"line {finding['line']}"
-    )
-    _run(["git", "commit", "-m", commit_msg])
-
-    # Push
-    remote_url = (
-        f"https://x-access-token:{github_token}@github.com/{repo_name}.git"
-    )
-    rc, _, err = _run(["git", "push", remote_url, f"HEAD:{branch}"])
-    if rc != 0:
-        log.error("Failed to push branch %s: %s", branch, err)
-        return None
-
-    # Open draft PR via PyGithub
-    try:
-        from github import Github  # type: ignore[import]
-    except ImportError:
-        log.warning("PyGithub not installed – branch pushed but no PR created.")
-        return branch
-
-    gh = Github(github_token)
-    repo = gh.get_repo(repo_name)
-
-    # Determine default branch
-    default_branch = repo.default_branch
-
-    pr_body = (
-        "## AI-Proposed Fix\n\n"
-        f"**Tool:** {finding['tool']}  \n"
-        f"**Code:** {finding['code']}  \n"
-        f"**File:** `{finding['file']}` line {finding['line']}  \n\n"
-        "### Diff applied\n"
-        f"```diff\n{diff}\n```\n\n"
-        "> This PR was opened automatically by the `ai-propose-fixes` workflow. "
-        "Please review carefully before merging."
-    )
-
-    pr = repo.create_pull(
-        title=commit_msg,
-        body=pr_body,
-        head=branch,
-        base=default_branch,
-        draft=True,
-    )
-    log.info("Opened draft PR #%d: %s", pr.number, pr.html_url)
-    return pr.html_url
+def open_pr(title: str, body: str) -> None:
+    result = run([
+        "gh", "pr", "create",
+        "--title", title,
+        "--body", body,
+        "--base", BASE_BRANCH,
+        "--label", "auto-fix",
+    ])
+    if result.returncode == 0:
+        print(f"✅ PR created: {result.stdout.strip()}")
+    else:
+        print(f"⚠️  PR creation failed: {result.stderr[:300]}")
 
 
-# ---------------------------------------------------------------------------
-# Step 5 – Append to run log
-# ---------------------------------------------------------------------------
-
-
-def append_run_log(entry: dict) -> None:
-    """Append *entry* to scripts/ai/run_log.json."""
-    try:
-        existing: list = json.loads(RUN_LOG_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        existing = []
-
-    existing.append(entry)
-    RUN_LOG_PATH.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    log.info("=== AI Propose Fixes – %s ===", datetime.now(tz=timezone.utc).isoformat())
+    parser = argparse.ArgumentParser(description="Devonn Autonomous Fix Engine")
+    parser.add_argument("--issue-body", default="", help="GitHub issue body to fix")
+    parser.add_argument("--dry-run", action="store_true", help="Run analysis only, no commits")
+    args = parser.parse_args()
 
-    # Collect low-risk findings
-    findings = run_mypy() + run_flake8()
+    print(f"\n{'='*60}")
+    print(f"  Devonn Autonomous Fix Engine  |  {datetime.now(timezone.utc).isoformat()}")
+    print(f"{'='*60}\n")
 
-    if not findings:
-        log.info("No low-risk findings – nothing to fix.")
-        append_run_log(
-            {
-                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                "findings": 0,
-                "fixes_attempted": 0,
-                "prs_opened": [],
-            }
+    # ── 1. Run tests ──────────────────────────────────────────────────────────
+    print("🔍 Running test suite...")
+    test_code, test_logs = run_tests()
+
+    # ── 2. Run lint ───────────────────────────────────────────────────────────
+    print("🔍 Running linter...")
+    lint_code, lint_logs = run_lint()
+
+    all_clear = (test_code == 0) and (lint_code == 0) and not args.issue_body
+
+    if all_clear:
+        print("\n✅ All checks pass — no action needed.")
+        return
+
+    # ── 3. Collect failure context ────────────────────────────────────────────
+    failure_summary = ""
+    if test_code != 0:
+        failure_summary += f"## Test Failures\n```\n{test_logs}\n```\n\n"
+    if lint_code != 0:
+        failure_summary += f"## Lint Errors\n```\n{lint_logs}\n```\n\n"
+    if args.issue_body:
+        failure_summary += f"## GitHub Issue\n{args.issue_body}\n\n"
+
+    print(f"\n⚠️  Issues detected:\n{failure_summary[:500]}...")
+
+    # ── 4. Generate LLM fix ───────────────────────────────────────────────────
+    print("\n🤖 Calling LLM fix engine...")
+    patch = generate_fix_with_llm(failure_summary, args.issue_body)
+
+    if not patch or patch == "NO_FIX":
+        print("❌ LLM could not generate a fix — opening informational PR.")
+        if args.dry_run:
+            print("[DRY RUN] Would open informational PR.")
+            return
+        create_branch()
+        open_pr(
+            title=f"[Auto] CI failure detected — manual review needed",
+            body=f"## Automated Detection\n\nThe Devonn Fix Engine detected failures but could not auto-patch them.\n\n{failure_summary[:2000]}"
         )
         return
 
-    log.info("Found %d low-risk finding(s) to attempt fixing.", len(findings))
+    # ── 5. Apply patch ────────────────────────────────────────────────────────
+    print("\n🔧 Applying generated patch...")
+    applied = apply_patch(patch)
 
-    prs_opened: list[str] = []
+    if not applied:
+        print("❌ Patch could not be applied cleanly.")
+        return
 
-    # Record the original branch so we can return to it after each iteration.
-    _, original_branch, _ = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-    original_branch = original_branch.strip() or "main"
+    # ── 6. Re-run tests to validate fix ──────────────────────────────────────
+    print("\n🔍 Re-running tests to validate fix...")
+    retest_code, retest_logs = run_tests()
 
-    for finding in findings:
-        log.info("Processing: %s", finding["message"])
+    if retest_code != 0:
+        print("❌ Fix did not resolve all failures — discarding patch.")
+        run(["git", "checkout", "--", "."])
+        return
 
-        diff = query_openai_for_fix(finding)
-        if not diff:
-            log.info("No diff produced for finding – skipping.")
-            continue
+    print("✅ Fix validated — all tests pass!")
 
-        if not apply_and_verify(diff):
-            log.info("Patch did not pass verification – skipping.")
-            # Log the diff that failed before reverting to aid debugging.
-            log.debug("Reverting failed diff:\n%s", diff)
-            _run(["git", "checkout", "--", "."])
-            continue
+    if args.dry_run:
+        print("[DRY RUN] Would commit and open PR.")
+        run(["git", "checkout", "--", "."])
+        return
 
-        pr_url = commit_and_open_pr(finding, diff)
-        if pr_url:
-            prs_opened.append(pr_url)
-
-        # Return to the original branch for the next iteration.
-        rc, _, err = _run(["git", "checkout", original_branch])
-        if rc != 0:
-            log.error("Failed to return to branch '%s': %s", original_branch, err)
-            break
-
-    log.info("Done. %d draft PR(s) opened.", len(prs_opened))
-
-    append_run_log(
-        {
-            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-            "findings": len(findings),
-            "fixes_attempted": len(findings),
-            "prs_opened": prs_opened,
-        }
+    # ── 7. Commit, push, open PR ──────────────────────────────────────────────
+    create_branch()
+    commit_and_push("auto: AI-generated fix — all tests passing")
+    open_pr(
+        title=f"[Auto Fix] {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
+        body=f"## Devonn Autonomous Fix\n\nThis PR was generated automatically by the Devonn AI Fix Engine.\n\n### Failures Detected\n{failure_summary[:1500]}\n\n### Patch Applied\n```diff\n{patch[:1000]}\n```\n\n✅ All tests pass after fix."
     )
 
 
