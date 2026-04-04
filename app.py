@@ -30,6 +30,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from storage import get_storage
+import metrics as _metrics
 
 
 # Module-level limiter — decorators reference this before init_app is called.
@@ -191,6 +192,7 @@ def _register_routes(app: Flask, jwt: JWTManager, limiter: Limiter) -> None:
                 'status': response.status_code,
                 'latency_ms': latency_ms,
             }))
+            _metrics.record(request.path, response.status_code, latency_ms)
         return response
 
     def admin_required(fn: Any) -> Any:
@@ -604,12 +606,22 @@ def _register_routes(app: Flask, jwt: JWTManager, limiter: Limiter) -> None:
     @app.route('/api/v1/health', methods=['GET'])
     @app.route('/api/health', methods=['GET'])
     def health() -> Tuple[Any, int]:
-        """Health check endpoint."""
+        """Enhanced health check with uptime and error-rate metrics."""
+        snap = _metrics.snapshot()
         return jsonify({
             'status': 'healthy',
             'timestamp': datetime.utcnow().isoformat() + 'Z',
-            'version': '1.0.0',
+            'version': '1.1.0',
+            'uptime_seconds': snap['uptime_seconds'],
+            'total_requests': snap['total_requests'],
+            'error_rate_pct': snap['error_rate_pct'],
         }), 200
+
+    @app.route('/api/v1/metrics', methods=['GET'])
+    @app.route('/api/metrics', methods=['GET'])
+    def metrics_endpoint() -> Tuple[Any, int]:
+        """Per-endpoint metrics snapshot (p50/p95 latency, error counts)."""
+        return jsonify(_metrics.snapshot()), 200
 
     @app.route('/api/v1/status', methods=['GET'])
     @app.route('/api/status', methods=['GET'])
