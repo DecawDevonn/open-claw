@@ -1,12 +1,9 @@
-"""MongoDB-backed storage backend.
-
-"""
+"""MongoDB-backed storage backend."""
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import pymongo
-from pymongo.collection import Collection
 
 from .base import StorageBackend
 
@@ -14,17 +11,9 @@ from .base import StorageBackend
 class MongoStorage(StorageBackend):
     """Persists data in MongoDB via pymongo."""
 
-    _client: pymongo.MongoClient
-    _users: Collection
-    _agents: Collection
-    _tasks: Collection
-    _revoked_tokens: Collection
-
     def __init__(self, uri: str, db_name: str = 'open-claw') -> None:
-        # Keep a typed instance attribute for the client so mypy is satisfied
-        # and the client is available for future use or debugging.
-        self._client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000)
-        db = self._client[db_name]
+        client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000)
+        db = client[db_name]
         self._users = db['users']
         self._agents = db['agents']
         self._tasks = db['tasks']

@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: open-claw
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn "app:create_app()" --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: FLASK_ENV
+        value: production
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: REDIS_URL
+        value: memory://
+    healthCheckPath: /api/health
+    autoDeploy: true

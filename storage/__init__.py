@@ -1,15 +1,20 @@
-"""OpenClaw storage package.
+"""Storage package — exports the backend abstraction and factory."""
 
-Exposes the abstract StorageBackend and the in-memory / MongoDB implementations.
-"""
+from typing import Optional
 
 from .base import StorageBackend
 from .memory import MemoryStorage
+from .mongo import MongoStorage
 
-__all__ = ["StorageBackend", "MemoryStorage"]
+__all__ = ['StorageBackend', 'MemoryStorage', 'MongoStorage', 'get_storage']
 
-try:
-    from .mongo import MongoStorage
-    __all__.append("MongoStorage")
-except ImportError:
-    pass  # pymongo not installed — MongoDB backend unavailable
+
+def get_storage(uri: Optional[str] = None) -> StorageBackend:
+    """Return the appropriate storage backend.
+
+    If *uri* is provided (non-empty), returns a :class:`MongoStorage` instance
+    connected to that URI.  Otherwise returns an in-memory :class:`MemoryStorage`.
+    """
+    if uri:
+        return MongoStorage(uri)
+    return MemoryStorage()
