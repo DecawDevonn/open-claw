@@ -782,7 +782,8 @@ def _register_routes(app: Flask, jwt: JWTManager, limiter: Limiter) -> None:
             # Call a tool
             if method == 'tools/call':
                 tool_name = params.get('name', '')
-                tool_args = params.get('arguments', {})
+                # tool_args available for future tool implementations
+                _ = params.get('arguments', {})
 
                 if tool_name == 'health_check':
                     checks: Dict[str, str] = {'flask': 'ok'}
