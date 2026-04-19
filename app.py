@@ -676,6 +676,190 @@ def _register_routes(app: Flask, jwt: JWTManager, limiter: Limiter) -> None:
         }), 200
 
     # ============================================
+    # MCP (Model Context Protocol) Endpoint
+    # ============================================
+
+    @app.route('/api/mcp', methods=['POST', 'OPTIONS'])
+    @app.route('/api/v1/mcp', methods=['POST', 'OPTIONS'])
+    def mcp_gateway() -> Tuple[Any, int]:
+        """JSON-RPC 2.0 endpoint for Model Context Protocol (MCP) tool access.
+
+        Supports methods: initialize, notifications/initialized, tools/list, tools/call
+        """
+        if request.method == 'OPTIONS':
+            from flask import make_response
+            resp = make_response('', 204)
+            resp.headers['Access-Control-Allow-Origin'] = '*'
+            resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+            resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, apikey'
+            return resp
+
+        try:
+            body = request.get_json(silent=True) or {}
+            rpc_id = body.get('id')
+            method = body.get('method', '')
+            params = body.get('params', {})
+
+            app.logger.info(json.dumps({'event': 'mcp_request', 'method': method}))
+
+            # Handle initialize handshake
+            if method == 'initialize':
+                return jsonify({
+                    'jsonrpc': '2.0',
+                    'id': rpc_id,
+                    'result': {
+                        'protocolVersion': '2024-11-05',
+                        'capabilities': {
+                            'tools': {'listChanged': False},
+                        },
+                        'serverInfo': {
+                            'name': 'devonn-mcp-server',
+                            'version': '1.0.0',
+                        },
+                    },
+                }), 200
+
+            # Handle initialized notification (no response needed)
+            if method == 'notifications/initialized':
+                return jsonify({
+                    'jsonrpc': '2.0',
+                    'id': rpc_id,
+                    'result': {},
+                }), 200
+
+            # List available tools
+            if method == 'tools/list':
+                tools = [
+                    {
+                        'name': 'health_check',
+                        'description': 'Check the health status of the Devonn.AI backend services',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {},
+                            'required': [],
+                        },
+                    },
+                    {
+                        'name': 'list_agents',
+                        'description': 'List all registered AI agents in the system',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {
+                                'page': {'type': 'integer', 'description': 'Page number (default: 1)'},
+                                'per_page': {'type': 'integer', 'description': 'Items per page (default: 20)'},
+                            },
+                            'required': [],
+                        },
+                    },
+                    {
+                        'name': 'list_tasks',
+                        'description': 'List all tasks in the system',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {
+                                'page': {'type': 'integer', 'description': 'Page number (default: 1)'},
+                                'per_page': {'type': 'integer', 'description': 'Items per page (default: 20)'},
+                            },
+                            'required': [],
+                        },
+                    },
+                    {
+                        'name': 'get_status',
+                        'description': 'Get the current system status including agent and task counts',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {},
+                            'required': [],
+                        },
+                    },
+                ]
+                return jsonify({
+                    'jsonrpc': '2.0',
+                    'id': rpc_id,
+                    'result': {'tools': tools},
+                }), 200
+
+            # Call a tool
+            if method == 'tools/call':
+                tool_name = params.get('name', '')
+                tool_args = params.get('arguments', {})
+
+                if tool_name == 'health_check':
+                    checks: Dict[str, str] = {'flask': 'ok'}
+                    mongodb_uri = app.config.get('MONGODB_URI', '')
+                    if mongodb_uri:
+                        try:
+                            import pymongo
+                            client = pymongo.MongoClient(
+                                mongodb_uri,
+                                serverSelectionTimeoutMS=2000,
+                                tlsCAFile='/global-bundle.pem' if 'docdb' in mongodb_uri else None,
+                            )
+                            client.admin.command('ping')
+                            checks['mongodb'] = 'ok'
+                            client.close()
+                        except Exception as exc:
+                            checks['mongodb'] = f'error: {str(exc)[:80]}'
+                    redis_url = app.config.get('REDIS_URL', 'memory://')
+                    if redis_url and not redis_url.startswith('memory://'):
+                        try:
+                            import redis as redis_lib
+                            r = redis_lib.from_url(redis_url, socket_connect_timeout=2)
+                            r.ping()
+                            checks['redis'] = 'ok'
+                        except Exception as exc:
+                            checks['redis'] = f'error: {str(exc)[:80]}'
+                    result_text = json.dumps({'status': 'healthy', 'checks': checks})
+
+                elif tool_name == 'list_agents':
+                    agents = app.storage.list_agents()
+                    result_text = json.dumps({'agents': agents, 'count': len(agents)})
+
+                elif tool_name == 'list_tasks':
+                    tasks = app.storage.list_tasks()
+                    result_text = json.dumps({'tasks': tasks, 'count': len(tasks)})
+
+                elif tool_name == 'get_status':
+                    all_tasks = app.storage.list_tasks()
+                    all_agents = app.storage.list_agents()
+                    result_text = json.dumps({
+                        'agents': len(all_agents),
+                        'tasks': len(all_tasks),
+                        'running': sum(1 for t in all_tasks if t['status'] == 'running'),
+                    })
+
+                else:
+                    return jsonify({
+                        'jsonrpc': '2.0',
+                        'id': rpc_id,
+                        'error': {'code': -32601, 'message': f'Unknown tool: {tool_name}'},
+                    }), 200
+
+                return jsonify({
+                    'jsonrpc': '2.0',
+                    'id': rpc_id,
+                    'result': {
+                        'content': [{'type': 'text', 'text': result_text}],
+                        'isError': False,
+                    },
+                }), 200
+
+            # Unknown method
+            return jsonify({
+                'jsonrpc': '2.0',
+                'id': rpc_id,
+                'error': {'code': -32601, 'message': f'Method not found: {method}'},
+            }), 200
+
+        except Exception as e:
+            app.logger.error(f'MCP error: {str(e)}')
+            return jsonify({
+                'jsonrpc': '2.0',
+                'id': None,
+                'error': {'code': -32603, 'message': 'Internal error'},
+            }), 200
+
+    # ============================================
     # Workforce Management Endpoints
     # ============================================
 
