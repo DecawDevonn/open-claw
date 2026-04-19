@@ -1,0 +1,231 @@
+name: devonn-prod-deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to deploy (backend, frontend, or all)'
+        required: false
+        default: 'all'
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REGISTRY: 211125423223.dkr.ecr.us-west-2.amazonaws.com
+  ECR_REPOSITORY: production/devonn-ai
+  EKS_CLUSTER_NAME: devonn-eks-prod
+  K8S_NAMESPACE: devonn
+
+jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1: Build and push backend image to ECR
+  # ─────────────────────────────────────────────
+  build-backend:
+    name: Build & Push Backend
+    runs-on: ubuntu-latest
+    if: github.event.inputs.service == 'backend' || github.event.inputs.service == 'all' || github.event_name == 'push'
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+
+    permissions:
+      contents: read
+      id-token: write  # for OIDC (future use)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          echo "image_tag=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=${SHORT_SHA}" >> $GITHUB_ENV
+
+      - name: Build backend Docker image
+        working-directory: ./backend
+        run: |
+          docker build \
+            --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+            --build-arg GIT_COMMIT=${GITHUB_SHA} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:backend-${IMAGE_TAG} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:backend-latest \
+            -f Dockerfile .
+
+      - name: Push backend image to ECR
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:backend-${IMAGE_TAG}
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:backend-latest
+
+  # ─────────────────────────────────────────────
+  # JOB 2: Build and push frontend image to ECR
+  # ─────────────────────────────────────────────
+  build-frontend:
+    name: Build & Push Frontend
+    runs-on: ubuntu-latest
+    if: github.event.inputs.service == 'frontend' || github.event.inputs.service == 'all' || github.event_name == 'push'
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          echo "image_tag=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=${SHORT_SHA}" >> $GITHUB_ENV
+
+      - name: Build frontend Docker image
+        working-directory: ./frontend
+        run: |
+          docker build \
+            --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+            --build-arg GIT_COMMIT=${GITHUB_SHA} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:frontend-${IMAGE_TAG} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:frontend-latest \
+            -f Dockerfile .
+
+      - name: Push frontend image to ECR
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:frontend-${IMAGE_TAG}
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:frontend-latest
+
+  # ─────────────────────────────────────────────
+  # JOB 3: Deploy to EKS (runs after both builds)
+  # ─────────────────────────────────────────────
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: [build-backend, build-frontend]
+    if: always() && (needs.build-backend.result == 'success' || needs.build-frontend.result == 'success')
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.33.0'
+
+      - name: Update kubeconfig for devonn-eks-prod
+        run: |
+          aws eks update-kubeconfig \
+            --name $EKS_CLUSTER_NAME \
+            --region $AWS_REGION
+
+      - name: Set image tag
+        run: echo "IMAGE_TAG=${GITHUB_SHA::8}" >> $GITHUB_ENV
+
+      - name: Update backend deployment image
+        if: needs.build-backend.result == 'success'
+        run: |
+          kubectl set image deployment/devonn-backend \
+            devonn-backend=$ECR_REGISTRY/$ECR_REPOSITORY:backend-${IMAGE_TAG} \
+            -n $K8S_NAMESPACE
+
+      - name: Update frontend deployment image
+        if: needs.build-frontend.result == 'success'
+        run: |
+          kubectl set image deployment/devonn-frontend \
+            devonn-frontend=$ECR_REGISTRY/$ECR_REPOSITORY:frontend-${IMAGE_TAG} \
+            -n $K8S_NAMESPACE
+
+      - name: Wait for backend rollout
+        if: needs.build-backend.result == 'success'
+        run: |
+          kubectl rollout status deployment/devonn-backend \
+            -n $K8S_NAMESPACE \
+            --timeout=300s
+
+      - name: Wait for frontend rollout
+        if: needs.build-frontend.result == 'success'
+        run: |
+          kubectl rollout status deployment/devonn-frontend \
+            -n $K8S_NAMESPACE \
+            --timeout=300s
+
+      - name: Verify backend health endpoint
+        run: |
+          sleep 10
+          BACKEND_URL="http://a31c616a020384ddb8abeacf5bae4ae4-414423657.us-west-2.elb.amazonaws.com"
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 ${BACKEND_URL}/health)
+          if [ "$RESPONSE" != "200" ]; then
+            echo "Backend health check failed: HTTP ${RESPONSE}"
+            exit 1
+          fi
+          echo "Backend health check passed: HTTP ${RESPONSE}"
+
+      - name: Verify frontend health endpoint
+        run: |
+          FRONTEND_URL="http://a27cc53ea5d8e451198f25e0b24944f1-28ee7c6def5d9884.elb.us-west-2.amazonaws.com"
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 ${FRONTEND_URL})
+          if [ "$RESPONSE" != "200" ]; then
+            echo "Frontend health check failed: HTTP ${RESPONSE}"
+            exit 1
+          fi
+          echo "Frontend health check passed: HTTP ${RESPONSE}"
+
+      - name: Print deployment summary
+        run: |
+          echo "=== Deployment Summary ==="
+          echo "Cluster:    $EKS_CLUSTER_NAME"
+          echo "Namespace:  $K8S_NAMESPACE"
+          echo "Image tag:  $IMAGE_TAG"
+          echo "Commit:     $GITHUB_SHA"
+          echo "Triggered by: $GITHUB_ACTOR"
+          echo ""
+          kubectl get pods -n $K8S_NAMESPACE
+          kubectl get deployments -n $K8S_NAMESPACE
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Deployment failed — rolling back..."
+          kubectl rollout undo deployment/devonn-backend -n $K8S_NAMESPACE || true
+          kubectl rollout undo deployment/devonn-frontend -n $K8S_NAMESPACE || true
+          kubectl rollout status deployment/devonn-backend -n $K8S_NAMESPACE --timeout=120s || true
+          kubectl rollout status deployment/devonn-frontend -n $K8S_NAMESPACE --timeout=120s || true
+          echo "Rollback complete."
+          exit 1
