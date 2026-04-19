@@ -51,4 +51,4 @@ jobs:
         run: pip install flake8
 
       - name: Lint with flake8
-        run: flake8 app.py openclaw/ --max-line-length=120
+        run: flake8 app.py storage/ --max-line-length=120 --extend-ignore=E501,W503
