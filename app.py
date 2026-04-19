@@ -604,12 +604,50 @@ def _register_routes(app: Flask, jwt: JWTManager, limiter: Limiter) -> None:
     @app.route('/api/v1/health', methods=['GET'])
     @app.route('/api/health', methods=['GET'])
     def health() -> Tuple[Any, int]:
-        """Health check endpoint."""
+        """Health check endpoint with dependency checks."""
+        checks: Dict[str, str] = {'flask': 'ok'}
+
+        # Check MongoDB / DocumentDB
+        mongodb_uri = app.config.get('MONGODB_URI', '')
+        if mongodb_uri:
+            try:
+                import pymongo
+                client = pymongo.MongoClient(
+                    mongodb_uri,
+                    serverSelectionTimeoutMS=2000,
+                    tlsCAFile='/global-bundle.pem' if 'docdb' in mongodb_uri else None,
+                )
+                client.admin.command('ping')
+                checks['mongodb'] = 'ok'
+                client.close()
+            except Exception as exc:
+                checks['mongodb'] = f'error: {str(exc)[:80]}'
+        else:
+            checks['mongodb'] = 'not_configured'
+
+        # Check Redis
+        redis_url = app.config.get('REDIS_URL', 'memory://')
+        if redis_url and not redis_url.startswith('memory://'):
+            try:
+                import redis as redis_lib
+                r = redis_lib.from_url(redis_url, socket_connect_timeout=2)
+                r.ping()
+                checks['redis'] = 'ok'
+            except Exception as exc:
+                checks['redis'] = f'error: {str(exc)[:80]}'
+        else:
+            checks['redis'] = 'in_memory'
+
+        overall = 'healthy' if all(
+            v in ('ok', 'not_configured', 'in_memory') for v in checks.values()
+        ) else 'degraded'
+
         return jsonify({
-            'status': 'healthy',
+            'status': overall,
             'timestamp': datetime.utcnow().isoformat() + 'Z',
             'version': '1.0.0',
-        }), 200
+            'checks': checks,
+        }), 200 if overall == 'healthy' else 207
 
     @app.route('/api/v1/status', methods=['GET'])
     @app.route('/api/status', methods=['GET'])
