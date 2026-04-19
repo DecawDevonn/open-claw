@@ -7,8 +7,9 @@ on:
 jobs:
   trigger-fix:
     runs-on: ubuntu-latest
-    # Only trigger for bug reports or issues labeled 'auto-fix'
+    # Trigger for ai-fix, auto-fix labels, bug reports, or [auto] title prefix
     if: |
+      contains(github.event.issue.labels.*.name, 'ai-fix') ||
       contains(github.event.issue.labels.*.name, 'auto-fix') ||
       contains(github.event.issue.labels.*.name, 'bug') ||
       contains(toJson(github.event.issue.title), '[auto]')
