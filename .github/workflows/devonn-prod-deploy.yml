@@ -13,7 +13,7 @@ on:
 env:
   AWS_REGION: us-west-2
   ECR_REGISTRY: 211125423223.dkr.ecr.us-west-2.amazonaws.com
-  ECR_REPOSITORY: devonn-app
+  ECR_REPOSITORY: production/devonn-ai
   EKS_CLUSTER_NAME: devonn-eks-prod
   K8S_NAMESPACE: devonn
   # ALB endpoint (single entrypoint for all traffic, WAF-protected)
@@ -69,8 +69,10 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.image_tag }}
-            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:backend-${{ steps.meta.outputs.image_tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:backend-latest
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:frontend-${{ steps.meta.outputs.image_tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:frontend-latest
           build-args: |
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             GIT_COMMIT=${{ github.sha }}
@@ -118,14 +120,14 @@ jobs:
         if: github.event.inputs.service == 'backend' || github.event.inputs.service == 'all' || github.event_name == 'push'
         run: |
           kubectl set image deployment/devonn-backend \
-            devonn-backend=$ECR_REGISTRY/$ECR_REPOSITORY:${IMAGE_TAG} \
+            devonn-backend=$ECR_REGISTRY/$ECR_REPOSITORY:backend-${IMAGE_TAG} \
             -n $K8S_NAMESPACE
 
       - name: Update frontend deployment image
         if: github.event.inputs.service == 'frontend' || github.event.inputs.service == 'all' || github.event_name == 'push'
         run: |
           kubectl set image deployment/devonn-frontend \
-            devonn-frontend=$ECR_REGISTRY/$ECR_REPOSITORY:${IMAGE_TAG} \
+            devonn-frontend=$ECR_REGISTRY/$ECR_REPOSITORY:frontend-${IMAGE_TAG} \
             -n $K8S_NAMESPACE
 
       - name: Wait for backend rollout
