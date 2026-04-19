@@ -16,9 +16,9 @@ env:
   ECR_REPOSITORY: production/devonn-ai
   EKS_CLUSTER_NAME: devonn-eks-prod
   K8S_NAMESPACE: devonn
-  # ALB endpoint (single entrypoint for all traffic, WAF-protected)
-  ALB_URL: http://devonn-alb-prod-1364416702.us-west-2.elb.amazonaws.com
-  # OIDC role — no static keys required
+  # Controller-managed ALB — target groups are auto-updated by AWS Load Balancer Controller
+  ALB_URL: http://devonn-alb-managed-2012536228.us-west-2.elb.amazonaws.com
+  # OIDC role — no static AWS keys required
   AWS_ROLE_ARN: arn:aws:iam::211125423223:role/devonn-github-actions-deploy
 
 jobs:
@@ -63,7 +63,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
@@ -81,6 +81,9 @@ jobs:
 
   # ─────────────────────────────────────────────
   # JOB 2: Deploy to EKS
+  # AWS Load Balancer Controller automatically updates
+  # ALB target groups when pod IPs change — no manual
+  # target registration required.
   # ─────────────────────────────────────────────
   deploy:
     name: Deploy to EKS
@@ -144,65 +147,10 @@ jobs:
             -n $K8S_NAMESPACE \
             --timeout=300s
 
-      - name: Re-register pod IPs in ALB target group
-        run: |
-          # After a rollout, pod IPs change — re-register them in the IP-mode target group
-          BACKEND_TG="arn:aws:elasticloadbalancing:us-west-2:211125423223:targetgroup/devonn-backend-ip-tg/02855dba534c7bc8"
-          FRONTEND_TG="arn:aws:elasticloadbalancing:us-west-2:211125423223:targetgroup/devonn-frontend-ip-tg/0f0d9e29fe8812d7"
-
-          # Get current backend pod IPs
-          BACKEND_IPS=$(kubectl get pods -n $K8S_NAMESPACE -l app=devonn-backend \
-            -o jsonpath='{.items[*].status.podIP}')
-          FRONTEND_IPS=$(kubectl get pods -n $K8S_NAMESPACE -l app=devonn-frontend \
-            -o jsonpath='{.items[*].status.podIP}')
-
-          echo "Backend pod IPs: $BACKEND_IPS"
-          echo "Frontend pod IPs: $FRONTEND_IPS"
-
-          # Deregister all current targets
-          CURRENT_BACKEND=$(aws elbv2 describe-target-health \
-            --target-group-arn "$BACKEND_TG" --region $AWS_REGION \
-            --query 'TargetHealthDescriptions[*].Target' --output json)
-          CURRENT_FRONTEND=$(aws elbv2 describe-target-health \
-            --target-group-arn "$FRONTEND_TG" --region $AWS_REGION \
-            --query 'TargetHealthDescriptions[*].Target' --output json)
-
-          if [ "$CURRENT_BACKEND" != "[]" ] && [ -n "$CURRENT_BACKEND" ]; then
-            aws elbv2 deregister-targets \
-              --target-group-arn "$BACKEND_TG" \
-              --targets $(echo $CURRENT_BACKEND | python3 -c "import sys,json; [print(f'Id={t[\"Id\"]},Port={t[\"Port\"]}') for t in json.load(sys.stdin)]" | tr '\n' ' ') \
-              --region $AWS_REGION || true
-          fi
-
-          if [ "$CURRENT_FRONTEND" != "[]" ] && [ -n "$CURRENT_FRONTEND" ]; then
-            aws elbv2 deregister-targets \
-              --target-group-arn "$FRONTEND_TG" \
-              --targets $(echo $CURRENT_FRONTEND | python3 -c "import sys,json; [print(f'Id={t[\"Id\"]},Port={t[\"Port\"]}') for t in json.load(sys.stdin)]" | tr '\n' ' ') \
-              --region $AWS_REGION || true
-          fi
-
-          sleep 5
-
-          # Register new pod IPs
-          BACKEND_TARGETS=$(for ip in $BACKEND_IPS; do echo "Id=${ip},Port=8080"; done | tr '\n' ' ')
-          FRONTEND_TARGETS=$(for ip in $FRONTEND_IPS; do echo "Id=${ip},Port=8080"; done | tr '\n' ' ')
-
-          aws elbv2 register-targets \
-            --target-group-arn "$BACKEND_TG" \
-            --targets $BACKEND_TARGETS \
-            --region $AWS_REGION
-
-          aws elbv2 register-targets \
-            --target-group-arn "$FRONTEND_TG" \
-            --targets $FRONTEND_TARGETS \
-            --region $AWS_REGION
-
-          echo "Pod IPs re-registered in ALB target groups"
-
       - name: Verify ALB health endpoint
         run: |
-          echo "Waiting 30s for ALB health checks to pass..."
-          sleep 30
+          echo "Waiting 20s for ALB health checks to stabilize..."
+          sleep 20
           RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 ${ALB_URL}/api/health)
           if [ "$RESPONSE" != "200" ]; then
             echo "ALB health check failed: HTTP ${RESPONSE}"
@@ -224,14 +172,15 @@ jobs:
           echo ""
           kubectl get pods -n $K8S_NAMESPACE -o wide
           kubectl get deployments -n $K8S_NAMESPACE
+          kubectl get ingress -n $K8S_NAMESPACE
 
       - name: Rollback on failure
         if: failure()
         run: |
-          echo "Deployment failed — initiating rollback..."
+          echo "Deployment failed — initiating automatic rollback..."
           kubectl rollout undo deployment/devonn-backend -n $K8S_NAMESPACE || true
           kubectl rollout undo deployment/devonn-frontend -n $K8S_NAMESPACE || true
           kubectl rollout status deployment/devonn-backend -n $K8S_NAMESPACE --timeout=120s || true
           kubectl rollout status deployment/devonn-frontend -n $K8S_NAMESPACE --timeout=120s || true
-          echo "Rollback complete."
+          echo "Rollback complete. Check CloudWatch alarms for root cause."
           exit 1

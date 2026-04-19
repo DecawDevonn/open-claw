@@ -12,7 +12,14 @@ class MongoStorage(StorageBackend):
     """Persists data in MongoDB via pymongo."""
 
     def __init__(self, uri: str, db_name: str = 'open-claw') -> None:
-        client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000)
+        import os
+        # Use TLS CA bundle for DocumentDB (Amazon RDS) connections
+        tls_ca = '/global-bundle.pem' if 'docdb' in uri and os.path.exists('/global-bundle.pem') else None
+        client = pymongo.MongoClient(
+            uri,
+            serverSelectionTimeoutMS=5000,
+            tlsCAFile=tls_ca,
+        )
         db = client[db_name]
         self._users = db['users']
         self._agents = db['agents']
