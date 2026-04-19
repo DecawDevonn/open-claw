@@ -10,3 +10,5 @@ APScheduler==3.11.2
 pytest==9.0.2
 pytest-cov==7.1.0
 flake8==7.3.0
+# Redis client
+redis>=5.0.0
