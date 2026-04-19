@@ -16,14 +16,14 @@ env:
   ECR_REPOSITORY: production/devonn-ai
   EKS_CLUSTER_NAME: devonn-eks-prod
   K8S_NAMESPACE: devonn
+  # OIDC role — no static keys required
+  AWS_ROLE_ARN: arn:aws:iam::211125423223:role/devonn-github-actions-deploy
 
 jobs:
   # ─────────────────────────────────────────────
   # JOB 1: Build and push image to ECR
   # open-claw is a monolithic Flask app (port 8080).
   # The root Dockerfile builds the full application.
-  # The same image is tagged as both backend-<sha> and
-  # frontend-<sha> so both EKS deployments can be updated.
   # Health endpoint: /api/health
   # ─────────────────────────────────────────────
   build:
@@ -34,17 +34,16 @@ jobs:
 
     permissions:
       contents: read
-      id-token: write  # reserved for future OIDC upgrade
+      id-token: write   # Required for OIDC
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
@@ -89,17 +88,16 @@ jobs:
 
     permissions:
       contents: read
-      id-token: write
+      id-token: write   # Required for OIDC
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Install kubectl
