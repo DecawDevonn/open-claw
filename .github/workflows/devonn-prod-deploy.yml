@@ -13,9 +13,11 @@ on:
 env:
   AWS_REGION: us-west-2
   ECR_REGISTRY: 211125423223.dkr.ecr.us-west-2.amazonaws.com
-  ECR_REPOSITORY: production/devonn-ai
+  ECR_REPOSITORY: devonn-app
   EKS_CLUSTER_NAME: devonn-eks-prod
   K8S_NAMESPACE: devonn
+  # ALB endpoint (single entrypoint for all traffic, WAF-protected)
+  ALB_URL: http://devonn-alb-prod-1364416702.us-west-2.elb.amazonaws.com
   # OIDC role — no static keys required
   AWS_ROLE_ARN: arn:aws:iam::211125423223:role/devonn-github-actions-deploy
 
@@ -67,10 +69,8 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:backend-${{ steps.meta.outputs.image_tag }}
-            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:backend-latest
-            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:frontend-${{ steps.meta.outputs.image_tag }}
-            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:frontend-latest
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.image_tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
           build-args: |
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             GIT_COMMIT=${{ github.sha }}
@@ -118,14 +118,14 @@ jobs:
         if: github.event.inputs.service == 'backend' || github.event.inputs.service == 'all' || github.event_name == 'push'
         run: |
           kubectl set image deployment/devonn-backend \
-            devonn-backend=$ECR_REGISTRY/$ECR_REPOSITORY:backend-${IMAGE_TAG} \
+            devonn-backend=$ECR_REGISTRY/$ECR_REPOSITORY:${IMAGE_TAG} \
             -n $K8S_NAMESPACE
 
       - name: Update frontend deployment image
         if: github.event.inputs.service == 'frontend' || github.event.inputs.service == 'all' || github.event_name == 'push'
         run: |
           kubectl set image deployment/devonn-frontend \
-            devonn-frontend=$ECR_REGISTRY/$ECR_REPOSITORY:frontend-${IMAGE_TAG} \
+            devonn-frontend=$ECR_REGISTRY/$ECR_REPOSITORY:${IMAGE_TAG} \
             -n $K8S_NAMESPACE
 
       - name: Wait for backend rollout
@@ -142,38 +142,85 @@ jobs:
             -n $K8S_NAMESPACE \
             --timeout=300s
 
-      - name: Verify backend health endpoint
+      - name: Re-register pod IPs in ALB target group
         run: |
-          sleep 10
-          BACKEND_URL="http://a31c616a020384ddb8abeacf5bae4ae4-414423657.us-west-2.elb.amazonaws.com"
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 ${BACKEND_URL}/api/health)
-          if [ "$RESPONSE" != "200" ]; then
-            echo "Backend health check failed: HTTP ${RESPONSE}"
-            exit 1
-          fi
-          echo "Backend health check passed: HTTP ${RESPONSE}"
-          curl -s ${BACKEND_URL}/api/health
+          # After a rollout, pod IPs change — re-register them in the IP-mode target group
+          BACKEND_TG="arn:aws:elasticloadbalancing:us-west-2:211125423223:targetgroup/devonn-backend-ip-tg/02855dba534c7bc8"
+          FRONTEND_TG="arn:aws:elasticloadbalancing:us-west-2:211125423223:targetgroup/devonn-frontend-ip-tg/0f0d9e29fe8812d7"
 
-      - name: Verify frontend health endpoint
+          # Get current backend pod IPs
+          BACKEND_IPS=$(kubectl get pods -n $K8S_NAMESPACE -l app=devonn-backend \
+            -o jsonpath='{.items[*].status.podIP}')
+          FRONTEND_IPS=$(kubectl get pods -n $K8S_NAMESPACE -l app=devonn-frontend \
+            -o jsonpath='{.items[*].status.podIP}')
+
+          echo "Backend pod IPs: $BACKEND_IPS"
+          echo "Frontend pod IPs: $FRONTEND_IPS"
+
+          # Deregister all current targets
+          CURRENT_BACKEND=$(aws elbv2 describe-target-health \
+            --target-group-arn "$BACKEND_TG" --region $AWS_REGION \
+            --query 'TargetHealthDescriptions[*].Target' --output json)
+          CURRENT_FRONTEND=$(aws elbv2 describe-target-health \
+            --target-group-arn "$FRONTEND_TG" --region $AWS_REGION \
+            --query 'TargetHealthDescriptions[*].Target' --output json)
+
+          if [ "$CURRENT_BACKEND" != "[]" ] && [ -n "$CURRENT_BACKEND" ]; then
+            aws elbv2 deregister-targets \
+              --target-group-arn "$BACKEND_TG" \
+              --targets $(echo $CURRENT_BACKEND | python3 -c "import sys,json; [print(f'Id={t[\"Id\"]},Port={t[\"Port\"]}') for t in json.load(sys.stdin)]" | tr '\n' ' ') \
+              --region $AWS_REGION || true
+          fi
+
+          if [ "$CURRENT_FRONTEND" != "[]" ] && [ -n "$CURRENT_FRONTEND" ]; then
+            aws elbv2 deregister-targets \
+              --target-group-arn "$FRONTEND_TG" \
+              --targets $(echo $CURRENT_FRONTEND | python3 -c "import sys,json; [print(f'Id={t[\"Id\"]},Port={t[\"Port\"]}') for t in json.load(sys.stdin)]" | tr '\n' ' ') \
+              --region $AWS_REGION || true
+          fi
+
+          sleep 5
+
+          # Register new pod IPs
+          BACKEND_TARGETS=$(for ip in $BACKEND_IPS; do echo "Id=${ip},Port=8080"; done | tr '\n' ' ')
+          FRONTEND_TARGETS=$(for ip in $FRONTEND_IPS; do echo "Id=${ip},Port=8080"; done | tr '\n' ' ')
+
+          aws elbv2 register-targets \
+            --target-group-arn "$BACKEND_TG" \
+            --targets $BACKEND_TARGETS \
+            --region $AWS_REGION
+
+          aws elbv2 register-targets \
+            --target-group-arn "$FRONTEND_TG" \
+            --targets $FRONTEND_TARGETS \
+            --region $AWS_REGION
+
+          echo "Pod IPs re-registered in ALB target groups"
+
+      - name: Verify ALB health endpoint
         run: |
-          FRONTEND_URL="http://a27cc53ea5d8e451198f25e0b24944f1-28ee7c6def5d9884.elb.us-west-2.amazonaws.com"
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 ${FRONTEND_URL}/api/health)
+          echo "Waiting 30s for ALB health checks to pass..."
+          sleep 30
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 ${ALB_URL}/api/health)
           if [ "$RESPONSE" != "200" ]; then
-            echo "Frontend health check failed: HTTP ${RESPONSE}"
+            echo "ALB health check failed: HTTP ${RESPONSE}"
+            curl -sv ${ALB_URL}/api/health || true
             exit 1
           fi
-          echo "Frontend health check passed: HTTP ${RESPONSE}"
+          echo "ALB health check passed: HTTP ${RESPONSE}"
+          curl -s ${ALB_URL}/api/health | python3 -m json.tool
 
       - name: Print deployment summary
         run: |
           echo "=== Deployment Summary ==="
           echo "Cluster:      $EKS_CLUSTER_NAME"
           echo "Namespace:    $K8S_NAMESPACE"
-          echo "Image tag:    $IMAGE_TAG"
+          echo "Image:        $ECR_REGISTRY/$ECR_REPOSITORY:${IMAGE_TAG}"
           echo "Commit SHA:   $GITHUB_SHA"
           echo "Triggered by: $GITHUB_ACTOR"
+          echo "ALB URL:      $ALB_URL"
           echo ""
-          kubectl get pods -n $K8S_NAMESPACE
+          kubectl get pods -n $K8S_NAMESPACE -o wide
           kubectl get deployments -n $K8S_NAMESPACE
 
       - name: Rollback on failure
