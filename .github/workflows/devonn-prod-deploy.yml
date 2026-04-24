@@ -19,7 +19,7 @@ env:
   # Controller-managed ALB — target groups are auto-updated by AWS Load Balancer Controller
   ALB_URL: http://devonn-alb-managed-2012536228.us-west-2.elb.amazonaws.com
   # OIDC role — no static AWS keys required
-  AWS_ROLE_ARN: arn:aws:iam::211125423223:role/devonn-github-actions-deploy
+  AWS_ROLE_ARN: arn:aws:iam::211125423223:role/github-oidc-deployer
 
 jobs:
   # ─────────────────────────────────────────────
